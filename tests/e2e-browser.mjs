@@ -221,10 +221,31 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     assert.equal(stillOpenWhileEditing, true, `[${browser.name}] 编辑表单时面板意外收起`);
     console.log(`[E2E:${browser.name}] ✓ 编辑表单时防误关锁定生效`);
 
-    // 填写名称与自定义协议并保存
+    // 填写名称与自定义协议，顺便验证切换 Emoji / 图片图标草稿不互相串台
     await pageCdp.eval(`
       (() => {
         const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const segBtns = Array.from(sr.querySelectorAll('.ql-seg-btn'));
+        segBtns.find((b) => b.textContent === 'Emoji').click();
+        sr.querySelector('.ql-chip').click(); // 选 💻
+        segBtns.find((b) => b.textContent === '图片图标').click();
+      })()
+    `);
+    await sleep(60);
+    const leakedImgVal = await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const imgInput = sr.querySelector('.ql-upload-row input.ql-input');
+        return imgInput ? imgInput.value : 'MISSING';
+      })()
+    `);
+    assert.equal(leakedImgVal, '', `[${browser.name}] 切换图标类型时 Emoji 泄露到了图片输入框`);
+
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const segBtns = Array.from(sr.querySelectorAll('.ql-seg-btn'));
+        segBtns.find((b) => b.textContent === '首字徽章').click();
         const inputs = sr.querySelectorAll('form.ql-form input.ql-input');
         inputs[0].value = 'Obsidian';
         inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
@@ -239,9 +260,9 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
       document.getElementById('qldock-extension-host').shadowRoot.querySelectorAll('.ql-card').length
     `);
     assert.equal(cardCount, 1, `[${browser.name}] 保存后未在网格渲染新增项`);
-    console.log(`[E2E:${browser.name}] ✓ 新增自定义协议并渲染成功`);
+    console.log(`[E2E:${browser.name}] ✓ 图标草稿隔离校验 + 新增自定义协议渲染成功`);
 
-    // 3.1 验证从 UTF-16LE BOM .reg 文件批量导入（含“已存在”自动不勾选与预览提交）
+    // 3.1 验证从 UTF-16LE BOM .reg 文件批量导入（含自动 Emoji 匹配 + 预览页修改 URL）
     await pageCdp.eval(`
       (() => {
         const sr = document.getElementById('qldock-extension-host').shadowRoot;
@@ -279,10 +300,20 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     `);
     await sleep(300);
 
-    const regPreviewCount = await pageCdp.eval(`
-      document.getElementById('qldock-extension-host').shadowRoot.querySelectorAll('.ql-reg-item').length
+    const regPreviewInfo = await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const items = Array.from(sr.querySelectorAll('.ql-reg-item'));
+        const icons = items.map((el) => el.querySelector('.ql-reg-icon-badge')?.textContent || '');
+        // 顺便在预览页给 steam 追加参数
+        const urlInputs = sr.querySelectorAll('.ql-reg-url-input');
+        urlInputs[2].value = 'steam://open/main';
+        urlInputs[2].dispatchEvent(new Event('input', { bubbles: true }));
+        return { count: items.length, icons };
+      })()
     `);
-    assert.equal(regPreviewCount, 3, `[${browser.name}] .reg 预览列表未识别出 3 个协议`);
+    assert.equal(regPreviewInfo.count, 3, `[${browser.name}] .reg 预览列表未识别出 3 个协议`);
+    assert.deepEqual(regPreviewInfo.icons, ['📝', '💻', '🎮'], `[${browser.name}] .reg 自动 Emoji 匹配异常`);
 
     // 点击“导入所选”提交（此前仅添加了带参数的 obsidian://open?vault=TestVault，本次精确新增 3 项，总数为 4）
     await pageCdp.eval(`
@@ -298,7 +329,23 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
       document.getElementById('qldock-extension-host').shadowRoot.querySelectorAll('.ql-card').length
     `);
     assert.equal(totalCardsAfterReg, 4, `[${browser.name}] .reg 批量导入后卡片总数应为 4`);
-    console.log(`[E2E:${browser.name}] ✓ UTF-16LE .reg 文件解析、预览与批量导入成功 (总数=4)`);
+    console.log(`[E2E:${browser.name}] ✓ UTF-16LE .reg 自动 Emoji 匹配、URL 微调与批量导入成功 (总数=4)`);
+
+    // 3.1.5 验证全局 Esc 键从设置子视图返回主列表
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        Array.from(sr.querySelectorAll('.ql-icon-btn')).find((b) => b.title.includes('设置')).click();
+      })()
+    `);
+    await sleep(100);
+    await pageCdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(120);
+    const backToListTitle = await pageCdp.eval(`
+      document.getElementById('qldock-extension-host').shadowRoot.querySelector('.ql-brand span:last-child')?.textContent
+    `);
+    assert.equal(backToListTitle, 'QuickLaunch', `[${browser.name}] 全局 Esc 未从设置页返回列表`);
+    console.log(`[E2E:${browser.name}] ✓ 全局 Esc 协同返回主列表生效`);
 
     // 3.2 验证独立标签页管理视图（?tab=1&view=settings）正常加载
     const tabUrl = `chrome-extension://${extId}/popup/popup.html?tab=1&view=settings`;
@@ -360,8 +407,15 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     assert.equal(popupCardText, 'Obsidian', `[${browser.name}] Popup 未同步显示新增快捷项`);
     console.log(`[E2E:${browser.name}] ✓ Popup 浮窗数据实时同步正常`);
 
-    // 点击卡片，验证同源中转页 launcher/launch.html 被正确打开
-    await popupCdp.eval(`document.querySelector('.ql-card').click()`);
+    // 搜索关键词并按 Enter 直接启动匹配项，验证扩展同源中转页 launcher/launch.html 被打开
+    await popupCdp.eval(`
+      (() => {
+        const search = document.querySelector('.ql-search-bar input');
+        search.value = 'TestVault';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      })()
+    `);
     await sleep(500);
 
     targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
@@ -371,8 +425,8 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
         t.url.startsWith(`chrome-extension://${extId}/launcher/launch.html?`) &&
         t.url.includes(encodeURIComponent('obsidian://open?vault=TestVault'))
     );
-    assert.ok(launcherTarget, `[${browser.name}] 点击自定义协议未打开同源中转页 launcher/launch.html`);
-    console.log(`[E2E:${browser.name}] ✓ 自定义协议成功经由同源中转页拉起`);
+    assert.ok(launcherTarget, `[${browser.name}] 搜索回车未打开同源中转页 launcher/launch.html`);
+    console.log(`[E2E:${browser.name}] ✓ 搜索回车直达自定义协议（同源中转页）生效`);
 
     // 检查页面与 Popup 无未捕获 JS 异常
     const pageErrors = pageCdp.events.filter((e) => e.method === 'Runtime.exceptionThrown');

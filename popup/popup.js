@@ -17,7 +17,7 @@
   styleEl.textContent = window.QLDock.PANEL_CSS;
   document.head.appendChild(styleEl);
 
-  window.QLDock.mountPanel(app, {
+  const panelApi = window.QLDock.mountPanel(app, {
     mode: isTabMode ? 'tab' : 'popup',
     initialView,
     onSettingsChange(settings) {
@@ -25,6 +25,14 @@
       app.setAttribute('data-theme', theme);
       if (isTabMode) {
         document.body.setAttribute('data-theme', theme);
+      }
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panelApi && typeof panelApi.handleEscape === 'function') {
+      if (panelApi.handleEscape()) {
+        e.preventDefault();
       }
     }
   });

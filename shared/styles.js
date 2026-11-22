@@ -156,6 +156,7 @@
 
     /* Main Panel Shell */
     .ql-panel {
+      position: relative;
       width: 100%;
       max-height: inherit;
       display: flex;
@@ -168,6 +169,33 @@
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
       overflow: hidden;
+    }
+
+    .ql-drop-overlay {
+      position: absolute;
+      inset: 8px;
+      z-index: 10;
+      border-radius: 11px;
+      border: 2px dashed var(--ql-accent);
+      background: var(--ql-bg);
+      opacity: 0.96;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      pointer-events: none;
+      text-align: center;
+      padding: 16px;
+      color: var(--ql-accent);
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .ql-drop-overlay-sub {
+      font-size: 11.5px;
+      font-weight: 400;
+      color: var(--ql-text-muted);
     }
 
     .ql-panel.is-popup {
@@ -340,6 +368,17 @@
 
     .ql-card:active {
       transform: translateY(0);
+    }
+
+    .ql-card.is-dragging,
+    .ql-row.is-dragging {
+      opacity: 0.4;
+    }
+
+    .ql-card.is-drag-over,
+    .ql-row.is-drag-over {
+      border-color: var(--ql-accent);
+      box-shadow: 0 0 0 2px var(--ql-accent-soft);
     }
 
     .ql-avatar {
@@ -763,6 +802,64 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .ql-reg-name-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .ql-reg-icon-badge {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      flex-shrink: 0;
+      background: var(--ql-bg);
+      border: 1px solid var(--ql-border);
+    }
+
+    .ql-reg-url-input {
+      padding: 4px 8px;
+      font-size: 11.5px;
+      font-family: Consolas, Monaco, monospace;
+    }
+
+    .ql-host-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 4px;
+    }
+
+    .ql-host-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 99px;
+      background: var(--ql-surface);
+      border: 1px solid var(--ql-border);
+      font-size: 11px;
+      color: var(--ql-text-muted);
+    }
+
+    .ql-host-remove {
+      border: none;
+      background: transparent;
+      color: var(--ql-text-muted);
+      cursor: pointer;
+      padding: 0 2px;
+      font-size: 12px;
+      line-height: 1;
+    }
+
+    .ql-host-remove:hover {
+      color: var(--ql-danger);
     }
 
     .ql-tag-muted {

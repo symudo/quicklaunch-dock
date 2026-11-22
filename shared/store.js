@@ -9,7 +9,8 @@
     topPercent: 42,     // 8 ~ 88
     hoverOpen: true,    // true: 悬停滑出; false: 仅点击滑出
     layout: 'grid',     // 'grid' | 'list'
-    theme: 'auto'       // 'auto' | 'light' | 'dark'
+    theme: 'auto',      // 'auto' | 'light' | 'dark'
+    hiddenHosts: []     // 在指定域名隐藏网页边缘拉手
   };
 
   const SAMPLE_ITEMS = [
@@ -82,23 +83,49 @@
     };
   }
 
+  function normalizeHost(host) {
+    if (typeof host !== 'string') return '';
+    return host.trim().toLowerCase().replace(/^https?:\/\//, '').split(/[/?#]/)[0];
+  }
+
   function normalizeSettings(raw) {
     const src = raw && typeof raw === 'object' ? raw : {};
     const topNum = Number(src.topPercent);
     const topPercent = Number.isFinite(topNum) ? Math.max(8, Math.min(88, Math.round(topNum))) : DEFAULT_SETTINGS.topPercent;
+    const seenHosts = new Set();
+    const hiddenHosts = [];
+    if (Array.isArray(src.hiddenHosts)) {
+      for (const h of src.hiddenHosts) {
+        const clean = normalizeHost(h);
+        if (clean && !seenHosts.has(clean) && hiddenHosts.length < 200) {
+          seenHosts.add(clean);
+          hiddenHosts.push(clean);
+        }
+      }
+    }
     return {
       side: src.side === 'left' ? 'left' : 'right',
       topPercent,
       hoverOpen: typeof src.hoverOpen === 'boolean' ? src.hoverOpen : DEFAULT_SETTINGS.hoverOpen,
       layout: src.layout === 'list' ? 'list' : 'grid',
-      theme: src.theme === 'light' || src.theme === 'dark' ? src.theme : 'auto'
+      theme: src.theme === 'light' || src.theme === 'dark' ? src.theme : 'auto',
+      hiddenHosts
     };
+  }
+
+  function isHostHidden(settings, hostname) {
+    const clean = normalizeHost(hostname);
+    if (!clean || !settings || !Array.isArray(settings.hiddenHosts)) return false;
+    return settings.hiddenHosts.includes(clean);
   }
 
   function formatRuntimeError(err) {
     const msg = err && err.message ? String(err.message) : String(err || '');
     if (/Extension context invalidated/i.test(msg)) {
       return new Error('扩展已更新或重载，请刷新当前网页后再试');
+    }
+    if (/QUOTA_BYTES/i.test(msg)) {
+      return new Error('本地存储空间已满，请精简上传的图片图标或清理无用项');
     }
     return err instanceof Error ? err : new Error(msg || '操作失败');
   }
@@ -246,6 +273,41 @@
     });
   }
 
+  function reorderItems(fromId, toId) {
+    return enqueueWrite(async () => {
+      if (!fromId || !toId || fromId === toId) {
+        return (await loadAll()).items;
+      }
+      const { items } = await loadAll();
+      const fromIdx = items.findIndex((x) => x.id === fromId);
+      const toIdx = items.findIndex((x) => x.id === toId);
+      if (fromIdx === -1 || toIdx === -1) return items;
+      const next = items.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      await writeItemsUnlocked(next);
+      return next;
+    });
+  }
+
+  function toggleHiddenHost(hostname, forceHidden) {
+    return enqueueWrite(async () => {
+      const clean = normalizeHost(hostname);
+      const current = (await loadAll()).settings;
+      if (!clean) return current;
+      const set = new Set(current.hiddenHosts || []);
+      const shouldHide = typeof forceHidden === 'boolean' ? forceHidden : !set.has(clean);
+      if (shouldHide) {
+        set.add(clean);
+      } else {
+        set.delete(clean);
+      }
+      const next = normalizeSettings(Object.assign({}, current, { hiddenHosts: Array.from(set) }));
+      await storageSet({ [STORAGE_KEY_SETTINGS]: next });
+      return next;
+    });
+  }
+
   function addSampleItems() {
     return enqueueWrite(async () => {
       const { items } = await loadAll();
@@ -362,14 +424,17 @@
     SAMPLE_ITEMS,
     normalizeItem,
     normalizeSettings,
+    isHostHidden,
     loadAll,
     saveItems,
     saveSettings,
+    toggleHiddenHost,
     addItem,
     addItemsBatch,
     updateItem,
     removeItem,
     moveItem,
+    reorderItems,
     addSampleItems,
     buildExportPayload,
     parseImportPayload,

@@ -7,6 +7,63 @@
     { prefix: 'HKEY_CLASSES_ROOT\\', scope: 'HKCR' }
   ];
 
+  const SCHEME_EMOJI_MAP = {
+    vscode: '💻',
+    'vscode-insiders': '💻',
+    cursor: '💻',
+    windsurf: '💻',
+    jetbrains: '💻',
+    idea: '💻',
+    obsidian: '📝',
+    notion: '📓',
+    typora: '📝',
+    logseq: '📝',
+    joplin: '📝',
+    craft: '📝',
+    anytype: '📝',
+    steam: '🎮',
+    'com.epicgames.launcher': '🎮',
+    epic: '🎮',
+    battlenet: '🎮',
+    weixin: '💬',
+    wechat: '💬',
+    dingtalk: '💼',
+    feishu: '💼',
+    lark: '💼',
+    qq: '🐧',
+    tim: '💬',
+    tg: '✈️',
+    telegram: '✈️',
+    discord: '🎧',
+    slack: '💬',
+    msteams: '💼',
+    zoommtg: '📹',
+    spotify: '🎵',
+    cloudmusic: '🎵',
+    orpheus: '🎵',
+    qqmusic: '🎵',
+    potplayer: '🎬',
+    vlc: '🎬',
+    figma: '🎨',
+    postman: '🚀',
+    insomnia: '🚀',
+    everything: '🔍',
+    raycast: '⚡',
+    utools: '⚡',
+    mailto: '📧',
+    thunder: '⚡',
+    magnet: '🧲'
+  };
+
+  function suggestIconForScheme(scheme) {
+    const key = String(scheme || '').trim().toLowerCase();
+    const emoji = SCHEME_EMOJI_MAP[key];
+    if (emoji) {
+      return { iconType: 'emoji', iconValue: emoji };
+    }
+    return { iconType: 'auto', iconValue: '' };
+  }
+
   function getProtocolHelper() {
     if (global.QLDock && global.QLDock.protocol) {
       return global.QLDock.protocol;
@@ -267,7 +324,14 @@
 
       if (!current) continue;
       const val = parseValueLine(t);
-      if (!val || val.kind === 'delete') continue;
+      if (!val) continue;
+
+      if (val.kind === 'delete') {
+        if (current.relLower === '' && val.name.toLowerCase() === 'url protocol') {
+          current.grp.hasMarker = false;
+        }
+        continue;
+      }
 
       if (current.relLower === '') {
         if (val.name.toLowerCase() === 'url protocol') {
@@ -304,13 +368,16 @@
       const schemeLower = grp.scheme.toLowerCase();
       const existing = mergedByScheme.get(schemeLower);
       if (!existing) {
+        const iconHint = suggestIconForScheme(grp.scheme);
         mergedByScheme.set(schemeLower, {
           scheme: grp.scheme,
           url: check.url,
           name: deriveDisplayName(grp.scheme, grp.description, grp.command),
           description: grp.description,
           command: grp.command,
-          scope: grp.scope
+          scope: grp.scope,
+          iconType: iconHint.iconType,
+          iconValue: iconHint.iconValue
         });
       } else {
         // 同一 .reg 同时含 HKCU/HKLM 同名协议时，补齐更丰富的描述或命令
@@ -342,7 +409,8 @@
     decodeRegBytes,
     parseRegText,
     parseRegBuffer,
-    deriveDisplayName
+    deriveDisplayName,
+    suggestIconForScheme
   };
 
   global.QLDock = global.QLDock || {};

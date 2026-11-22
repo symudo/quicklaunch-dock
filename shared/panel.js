@@ -70,9 +70,11 @@
   function mountPanel(container, options) {
     const opts = options || {};
     const mode = opts.mode || 'dock'; // 'dock' | 'popup' | 'tab'
+    const currentHostname = typeof opts.currentHostname === 'string' ? opts.currentHostname.trim() : '';
     const store = global.QLDock.store;
     const protocol = global.QLDock.protocol;
     const regParser = global.QLDock.regParser;
+    const MAX_REG_FILE_BYTES = 5 * 1024 * 1024;
 
     let state = {
       items: [],
@@ -84,19 +86,77 @@
       pinned: false,
       filePicking: false,
       searchFocused: false,
-      regDraft: null, // { fileName, skippedKeys, entries: [{ selected, name, url, scope, exists }] }
+      regDraft: null, // { fileName, skippedKeys, entries: [{ selected, name, url, scope, exists, iconType, iconValue }] }
       toast: ''
     };
 
     let toastTimer = null;
     let itemsHostRef = null;
     let layoutBtnRef = null;
+    let searchInputRef = null;
     let hasSearchBarRendered = false;
+    let didPopupAutoFocus = false;
+    let draggedItemId = null;
+    let fileDragDepth = 0;
 
     const panelClass =
       'ql-panel' + (mode === 'popup' ? ' is-popup' : mode === 'tab' ? ' is-tab' : '');
     const panel = el('div', panelClass);
     container.appendChild(panel);
+
+    const dropOverlay = el('div', 'ql-drop-overlay ql-hidden');
+    dropOverlay.appendChild(el('div', '', '松手导入 .reg 协议文件'));
+    dropOverlay.appendChild(el('div', 'ql-drop-overlay-sub', '支持 URL 协议管理器与 Windows regedit 导出'));
+
+    function isFileDragEvent(e) {
+      const types = e.dataTransfer && e.dataTransfer.types;
+      if (!types) return false;
+      return Array.from(types).includes('Files');
+    }
+
+    function setDropOverlayVisible(visible) {
+      dropOverlay.classList.toggle('ql-hidden', !visible);
+      if (visible && !dropOverlay.parentNode) {
+        panel.appendChild(dropOverlay);
+      }
+    }
+
+    panel.addEventListener('dragenter', (e) => {
+      if (!isFileDragEvent(e)) return;
+      e.preventDefault();
+      fileDragDepth += 1;
+      setDropOverlayVisible(true);
+    });
+
+    panel.addEventListener('dragover', (e) => {
+      if (!isFileDragEvent(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      setDropOverlayVisible(true);
+    });
+
+    panel.addEventListener('dragleave', (e) => {
+      if (!isFileDragEvent(e)) return;
+      fileDragDepth = Math.max(0, fileDragDepth - 1);
+      if (fileDragDepth === 0) {
+        setDropOverlayVisible(false);
+      }
+    });
+
+    panel.addEventListener('drop', (e) => {
+      if (!isFileDragEvent(e)) return;
+      e.preventDefault();
+      fileDragDepth = 0;
+      setDropOverlayVisible(false);
+      const files = e.dataTransfer && e.dataTransfer.files;
+      const file = files && files[0];
+      if (!file) return;
+      if (!/\.reg$/i.test(file.name || '')) {
+        showToast('请拖入 .reg 格式的注册表导出文件');
+        return;
+      }
+      handleRegFileSelected(file);
+    });
 
     // 持久化在 panel 之外的 .reg 文件选择器，避免任意视图切换时被销毁
     const regFileInput = document.createElement('input');
@@ -120,6 +180,10 @@
         showToast('未加载 .reg 解析模块');
         return;
       }
+      if (typeof file.size === 'number' && file.size > MAX_REG_FILE_BYTES) {
+        showToast('文件超过 5MB，请仅导入包含自定义 URL 协议的 .reg 文件');
+        return;
+      }
       try {
         const buffer = await file.arrayBuffer();
         const parsed = regParser.parseRegBuffer(buffer);
@@ -135,7 +199,9 @@
             name: p.name,
             url: p.url,
             scope: p.scope,
-            exists
+            exists,
+            iconType: p.iconType || 'auto',
+            iconValue: p.iconValue || ''
           };
         });
         state.regDraft = {
@@ -342,15 +408,73 @@
       return header;
     }
 
+    function getFilteredItems() {
+      const kw = state.search.trim().toLowerCase();
+      if (!kw) return state.items;
+      return state.items.filter(
+        (x) => x.name.toLowerCase().includes(kw) || x.url.toLowerCase().includes(kw)
+      );
+    }
+
+    function clearStaleSearch() {
+      if (state.search.trim() && getFilteredItems().length === 0) {
+        state.search = '';
+      }
+    }
+
+    function bindDragSort(node, itemId) {
+      node.draggable = true;
+      node.setAttribute('data-item-id', itemId);
+      node.addEventListener('dragstart', (e) => {
+        draggedItemId = itemId;
+        node.classList.add('is-dragging');
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          try {
+            e.dataTransfer.setData('text/plain', itemId);
+          } catch (_) {}
+        }
+      });
+      node.addEventListener('dragover', (e) => {
+        if (!draggedItemId || draggedItemId === itemId || isFileDragEvent(e)) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        node.classList.add('is-drag-over');
+      });
+      node.addEventListener('dragleave', () => {
+        node.classList.remove('is-drag-over');
+      });
+      node.addEventListener('drop', (e) => {
+        if (!draggedItemId || draggedItemId === itemId || isFileDragEvent(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        node.classList.remove('is-drag-over');
+        const fromId = draggedItemId;
+        draggedItemId = null;
+        runSafe(async () => {
+          state.items = await store.reorderItems(fromId, itemId);
+          refreshListInPlace();
+        });
+      });
+      node.addEventListener('dragend', () => {
+        draggedItemId = null;
+        node.classList.remove('is-dragging');
+        if (itemsHostRef) {
+          itemsHostRef.querySelectorAll('.is-drag-over').forEach((n) => n.classList.remove('is-drag-over'));
+        }
+      });
+    }
+
     function renderListView() {
       const frag = document.createDocumentFragment();
       hasSearchBarRendered = state.items.length > 0;
+      searchInputRef = null;
 
       if (hasSearchBarRendered) {
         const searchBar = el('div', 'ql-search-bar');
         const input = el('input', 'ql-input');
         input.type = 'search';
-        input.placeholder = '搜索名称或协议（如 vscode://）...';
+        input.placeholder = '搜索名称或协议，按回车直接打开...';
         input.value = state.search;
         input.addEventListener('focus', () => {
           state.searchFocused = true;
@@ -365,6 +489,16 @@
           notifyLock();
           renderItemsContainer(itemsHost);
         });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            const matched = getFilteredItems();
+            if (matched.length > 0) {
+              e.preventDefault();
+              handleLaunch(matched[0]);
+            }
+          }
+        });
+        searchInputRef = input;
         searchBar.appendChild(input);
         frag.appendChild(searchBar);
       }
@@ -428,11 +562,8 @@
       }
 
       const kw = state.search.trim().toLowerCase();
-      const filtered = kw
-        ? state.items.filter(
-            (x) => x.name.toLowerCase().includes(kw) || x.url.toLowerCase().includes(kw)
-          )
-        : state.items;
+      const filtered = getFilteredItems();
+      const canDragSort = !kw && filtered.length > 1;
 
       if (filtered.length === 0) {
         const empty = el('div', 'ql-empty');
@@ -447,6 +578,7 @@
           const row = el('div', 'ql-row');
           row.title = item.name + '\n' + item.url;
           row.addEventListener('click', () => handleLaunch(item));
+          if (canDragSort) bindDragSort(row, item.id);
 
           row.appendChild(createAvatarNode(item, protocol));
 
@@ -476,6 +608,7 @@
           const card = el('div', 'ql-card');
           card.title = item.name + '\n' + item.url;
           card.addEventListener('click', () => handleLaunch(item));
+          if (canDragSort) bindDragSort(card, item.id);
 
           card.appendChild(createAvatarNode(item, protocol));
           card.appendChild(el('div', 'ql-card-name', item.name));
@@ -506,8 +639,13 @@
       let formState = {
         name: existing ? existing.name : '',
         url: existing ? existing.url : '',
-        iconType: existing ? existing.iconType : 'auto',
-        iconValue: existing ? existing.iconValue : ''
+        iconType: existing ? existing.iconType : 'auto'
+      };
+
+      // 按图标类型隔离草稿值，避免切换 Emoji / 图片图标时互相污染
+      const iconDraft = {
+        emoji: existing && existing.iconType === 'emoji' ? existing.iconValue : '',
+        image: existing && existing.iconType === 'image' ? existing.iconValue : ''
       };
 
       const body = el('div', 'ql-body');
@@ -604,9 +742,9 @@
           const emojiInput = el('input', 'ql-input');
           emojiInput.type = 'text';
           emojiInput.placeholder = '输入任意 Emoji，如 📝';
-          emojiInput.value = formState.iconValue;
+          emojiInput.value = iconDraft.emoji;
           emojiInput.addEventListener('input', (e) => {
-            formState.iconValue = e.target.value;
+            iconDraft.emoji = e.target.value;
           });
           iconDetailBox.appendChild(emojiInput);
 
@@ -615,7 +753,7 @@
             const chip = el('button', 'ql-chip', em);
             chip.type = 'button';
             chip.addEventListener('click', () => {
-              formState.iconValue = em;
+              iconDraft.emoji = em;
               emojiInput.value = em;
             });
             chips.appendChild(chip);
@@ -626,9 +764,9 @@
           const imgInput = el('input', 'ql-input');
           imgInput.type = 'text';
           imgInput.placeholder = '粘贴图片 URL 或右侧上传本地图';
-          imgInput.value = formState.iconValue;
+          imgInput.value = iconDraft.image;
           imgInput.addEventListener('input', (e) => {
-            formState.iconValue = e.target.value;
+            iconDraft.image = e.target.value;
           });
 
           const fileInput = document.createElement('input');
@@ -643,7 +781,7 @@
             if (!file) return;
             try {
               const dataUrl = await resizeImageToDataUrl(file, 64);
-              formState.iconValue = dataUrl;
+              iconDraft.image = dataUrl;
               imgInput.value = dataUrl;
               showToast('图标已压缩并载入');
             } catch (err) {
@@ -670,7 +808,6 @@
         btn.type = 'button';
         btn.addEventListener('click', () => {
           formState.iconType = t.key;
-          if (t.key === 'auto') formState.iconValue = '';
           Array.from(seg.children).forEach((c, idx) => {
             c.classList.toggle('is-active', types[idx].key === t.key);
           });
@@ -724,6 +861,7 @@
           }
           runSafe(async () => {
             state.items = await store.removeItem(existing.id);
+            clearStaleSearch();
             state.view = 'list';
             state.editingId = null;
             state.confirmDelete = false;
@@ -770,7 +908,14 @@
           errorText.classList.remove('ql-hidden');
           return;
         }
-        if (formState.iconType === 'image' && formState.iconValue.trim() && !protocol.validateImageUrl(formState.iconValue)) {
+        const activeIconValue =
+          formState.iconType === 'emoji'
+            ? iconDraft.emoji.trim()
+            : formState.iconType === 'image'
+            ? iconDraft.image.trim()
+            : '';
+
+        if (formState.iconType === 'image' && activeIconValue && !protocol.validateImageUrl(activeIconValue)) {
           errorText.textContent = '图片地址无效，请填 http(s) 图片链接或上传本地图片';
           errorText.classList.remove('ql-hidden');
           return;
@@ -781,11 +926,12 @@
             name,
             url: urlCheck.url,
             iconType: formState.iconType,
-            iconValue: formState.iconValue.trim()
+            iconValue: activeIconValue
           };
           if (existing) {
             const res = await store.updateItem(existing.id, payload);
             state.items = res.items;
+            clearStaleSearch();
             showToast('已更新 ' + name);
           } else {
             const res = await store.addItem(payload);
@@ -879,9 +1025,64 @@
 
       wrap.appendChild(el('div', 'ql-divider'));
 
+      // 当前网站隐藏与黑名单管理
+      if (currentHostname || (state.settings.hiddenHosts && state.settings.hiddenHosts.length > 0)) {
+        const siteField = el('div', 'ql-field');
+        siteField.appendChild(el('label', 'ql-label', '站点边缘栏显示控制（全屏视频会自动隐藏）'));
+
+        if (currentHostname) {
+          const isHiddenNow = store.isHostHidden(state.settings, currentHostname);
+          const toggleSiteBtn = el(
+            'button',
+            'ql-btn is-sm' + (isHiddenNow ? ' is-primary' : ''),
+            isHiddenNow ? `在 ${currentHostname} 恢复显示` : `在 ${currentHostname} 隐藏边缘栏`
+          );
+          toggleSiteBtn.type = 'button';
+          toggleSiteBtn.addEventListener('click', () => {
+            runSafe(async () => {
+              state.settings = await store.toggleHiddenHost(currentHostname);
+              notifySettings();
+              showToast(
+                store.isHostHidden(state.settings, currentHostname)
+                  ? `已在 ${currentHostname} 隐藏，随时可从扩展图标恢复`
+                  : `已在 ${currentHostname} 恢复边缘栏`
+              );
+              render();
+            });
+          });
+          siteField.appendChild(toggleSiteBtn);
+        }
+
+        const hiddenList = state.settings.hiddenHosts || [];
+        if (hiddenList.length > 0) {
+          const chips = el('div', 'ql-host-chips');
+          hiddenList.forEach((h) => {
+            const tag = el('span', 'ql-host-tag');
+            tag.appendChild(el('span', '', h));
+            const rmBtn = el('button', 'ql-host-remove', '×');
+            rmBtn.type = 'button';
+            rmBtn.title = `取消隐藏 ${h}`;
+            rmBtn.addEventListener('click', () => {
+              runSafe(async () => {
+                state.settings = await store.toggleHiddenHost(h, false);
+                notifySettings();
+                showToast(`已恢复 ${h} 的边缘栏`);
+                render();
+              });
+            });
+            tag.appendChild(rmBtn);
+            chips.appendChild(tag);
+          });
+          siteField.appendChild(chips);
+        }
+
+        wrap.appendChild(siteField);
+        wrap.appendChild(el('div', 'ql-divider'));
+      }
+
       // 备份与恢复
       const backupField = el('div', 'ql-field');
-      backupField.appendChild(el('label', 'ql-label', '数据迁移与快速导入'));
+      backupField.appendChild(el('label', 'ql-label', '数据迁移与快速导入（也支持直接拖入 .reg 文件）'));
       const btnRow = el('div', 'ql-btn-wrap');
 
       const importRegBtn = el('button', 'ql-btn is-sm is-primary', '导入 .reg');
@@ -903,8 +1104,11 @@
         const a = document.createElement('a');
         a.href = url;
         a.download = 'quicklaunch-dock-backup.json';
+        a.className = 'ql-hidden';
+        panel.appendChild(a);
         a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
         showToast('已导出备份文件');
       });
 
@@ -1020,6 +1224,18 @@
         });
 
         const fields = el('div', 'ql-reg-fields');
+
+        const nameRow = el('div', 'ql-reg-name-row');
+        const iconPreview = el('span', 'ql-reg-icon-badge');
+        if (entry.iconType === 'emoji' && entry.iconValue) {
+          iconPreview.textContent = entry.iconValue;
+        } else {
+          const badge = protocol.getBadgeInfo(entry.name, entry.url);
+          iconPreview.textContent = badge.char;
+          iconPreview.style.background = badge.gradient;
+          iconPreview.style.color = '#fff';
+          iconPreview.style.border = 'none';
+        }
         const nameInput = el('input', 'ql-input');
         nameInput.type = 'text';
         nameInput.maxLength = 40;
@@ -1028,16 +1244,27 @@
         nameInput.addEventListener('input', (e) => {
           entry.name = e.target.value;
         });
+        nameRow.appendChild(iconPreview);
+        nameRow.appendChild(nameInput);
+
+        const urlInput = el('input', 'ql-input ql-reg-url-input');
+        urlInput.type = 'text';
+        urlInput.value = entry.url;
+        urlInput.placeholder = '协议链接（可追加参数）';
+        urlInput.addEventListener('input', (e) => {
+          entry.url = e.target.value;
+        });
 
         const meta = el('div', 'ql-reg-meta');
-        meta.appendChild(el('span', 'ql-reg-scheme', entry.url));
+        meta.appendChild(el('span', 'ql-reg-scheme', entry.exists ? '当前列表已有此链接' : '可微调名称或追加参数'));
         if (entry.exists) {
           meta.appendChild(el('span', 'ql-tag-muted', '已存在'));
         } else {
           meta.appendChild(el('span', 'ql-tag-muted', entry.scope));
         }
 
-        fields.appendChild(nameInput);
+        fields.appendChild(nameRow);
+        fields.appendChild(urlInput);
         fields.appendChild(meta);
 
         row.appendChild(checkbox);
@@ -1067,17 +1294,24 @@
       submitBtn.type = 'button';
       updateSubmitLabel();
       submitBtn.addEventListener('click', () => {
-        const chosen = draft.entries
-          .filter((x) => x.selected)
-          .map((x) => ({
-            name: (x.name || '').trim() || x.url.replace(/:\/\/$/, ''),
-            url: x.url,
-            iconType: 'auto',
-            iconValue: ''
-          }));
-        if (chosen.length === 0) {
+        const selectedEntries = draft.entries.filter((x) => x.selected);
+        if (selectedEntries.length === 0) {
           showToast('请至少勾选一个协议');
           return;
+        }
+        const chosen = [];
+        for (const x of selectedEntries) {
+          const urlCheck = protocol.validateUrl(x.url);
+          if (!urlCheck.valid) {
+            showToast(`链接无效（${x.name || x.url}）：${urlCheck.reason}`);
+            return;
+          }
+          chosen.push({
+            name: (x.name || '').trim() || urlCheck.scheme,
+            url: urlCheck.url,
+            iconType: x.iconType || 'auto',
+            iconValue: x.iconValue || ''
+          });
         }
         runSafe(async () => {
           const res = await store.addItemsBatch(chosen);
@@ -1132,14 +1366,26 @@
       renderItemsContainer(itemsHostRef);
     }
 
-    function onPanelKeydown(e) {
-      if (e.key === 'Escape' && state.view !== 'list') {
-        e.stopPropagation();
+    function handleEscape() {
+      if (state.view !== 'list') {
         state.view = 'list';
         state.editingId = null;
         state.confirmDelete = false;
         state.regDraft = null;
         render();
+        return true;
+      }
+      if (state.search.trim()) {
+        state.search = '';
+        render();
+        return true;
+      }
+      return false;
+    }
+
+    function onPanelKeydown(e) {
+      if (e.key === 'Escape' && handleEscape()) {
+        e.stopPropagation();
       }
     }
     panel.addEventListener('keydown', onPanelKeydown);
@@ -1151,6 +1397,10 @@
         state.settings = data.settings;
         notifySettings();
         render();
+        if (mode === 'popup' && !didPopupAutoFocus && searchInputRef) {
+          didPopupAutoFocus = true;
+          setTimeout(() => searchInputRef && searchInputRef.focus(), 20);
+        }
       } catch (err) {
         render();
         showToast((err && err.message) || '读取配置失败');
@@ -1169,6 +1419,7 @@
     init();
 
     return {
+      handleEscape,
       destroy() {
         unsubscribe();
         panel.removeEventListener('keydown', onPanelKeydown);

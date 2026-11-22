@@ -215,10 +215,20 @@ test('store CRUD、排序、设置边界截断、JSON 导出导入与实时同�
   assert.equal(updated.item.name, 'VS Code Insiders');
   assert.equal(updated.item.url, 'vscode-insiders://');
 
-  // 排序（第 2 项前移）
+  // 排序（第 2 项前移）& 拖拽重排 reorderItems
   const moved = await store.moveItem(r2.item.id, -1);
   assert.equal(moved[0].id, r2.item.id);
   assert.equal(moved[1].id, r1.item.id);
+
+  const reordered = await store.reorderItems(r2.item.id, r1.item.id);
+  assert.equal(reordered[0].id, r1.item.id);
+  assert.equal(reordered[1].id, r2.item.id);
+
+  // 域名隐藏黑名单
+  const sHidden = await store.toggleHiddenHost('Example.COM', true);
+  assert.equal(store.isHostHidden(sHidden, 'example.com'), true);
+  const sRestored = await store.toggleHiddenHost('example.com', false);
+  assert.equal(store.isHostHidden(sRestored, 'example.com'), false);
 
   // 设置校验（超出边界的 topPercent 自动夹紧）+ 并发写入不互相覆盖
   await Promise.all([
@@ -307,6 +317,10 @@ test('background.js 消息路由：网页直开、自定义协议走同源中转
 
 test('extract-changelog.mjs：从 CHANGELOG.md 精准提取对应版本更新日志', () => {
   const md = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const v120 = extractVersionNotes(md, 'v1.2.0');
+  assert.ok(v120.includes('全屏视频自动隐藏边缘拉手'));
+  assert.equal(v120.includes('导入 `.reg` 注册表文件批量快速添加'), false);
+
   const v110 = extractVersionNotes(md, 'v1.1.0');
   assert.ok(v110.includes('导入 `.reg` 注册表文件'));
   assert.equal(v110.includes('修复边缘抽屉严重定位错位'), false);
@@ -374,6 +388,11 @@ test('reg-parser.js：解析 url-protocol-manager 导出的 UTF-16LE BOM .reg �
     '[HKEY_CURRENT_USER\\Software\\Classes\\notaprotocol]',
     '@="Not a URL Protocol"',
     '',
+    // 后置删除 "URL Protocol"=- 应撤销标记
+    '[HKEY_CURRENT_USER\\Software\\Classes\\revokedproto]',
+    '"URL Protocol"=""',
+    '"URL Protocol"=-',
+    '',
     // 网页/危险协议即使有标记也必须被安全过滤
     '[HKEY_CLASSES_ROOT\\javascript]',
     '"URL Protocol"=""',
@@ -386,14 +405,14 @@ test('reg-parser.js：解析 url-protocol-manager 导出的 UTF-16LE BOM .reg �
 
   assert.equal(parsed.protocols.length, 3);
   assert.deepEqual(
-    parsed.protocols.map((p) => ({ name: p.name, url: p.url })),
+    parsed.protocols.map((p) => ({ name: p.name, url: p.url, iconType: p.iconType, iconValue: p.iconValue })),
     [
-      { name: 'Obsidian', url: 'obsidian://' },
-      { name: 'MyToolApp', url: 'mytool://' },
-      { name: '我的笔记工具', url: 'my-note://' }
+      { name: 'Obsidian', url: 'obsidian://', iconType: 'emoji', iconValue: '📝' },
+      { name: 'MyToolApp', url: 'mytool://', iconType: 'auto', iconValue: '' },
+      { name: '我的笔记工具', url: 'my-note://', iconType: 'auto', iconValue: '' }
     ]
   );
-  assert.ok(parsed.skippedKeys >= 4);
+  assert.ok(parsed.skippedKeys >= 5);
 
   // 测试 store.addItemsBatch 原子批量写入
   const { mockChrome } = createMockChrome();

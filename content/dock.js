@@ -43,12 +43,27 @@
   let isLocked = false;
   let hoverOpenEnabled = true;
   let currentTopPercent = 42;
+  let isHostHidden = false;
+  let isFullscreen = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
   let openTimer = null;
   let closeTimer = null;
   let isDragging = false;
   let dragStartY = 0;
   let dragStartPercent = 42;
   let didDragMove = false;
+  const currentHostname = (window.location && window.location.hostname) || '';
+
+  function updateVisibility() {
+    const shouldHide = isHostHidden || isFullscreen;
+    if (shouldHide) {
+      clearTimers();
+      isOpen = false;
+      wrap.classList.remove('is-open');
+      host.style.display = 'none';
+    } else {
+      host.style.display = '';
+    }
+  }
 
   function clearTimers() {
     if (openTimer) {
@@ -82,9 +97,11 @@
     if (!settings) return;
     hoverOpenEnabled = settings.hoverOpen !== false;
     currentTopPercent = Number.isFinite(settings.topPercent) ? settings.topPercent : 42;
+    isHostHidden = store.isHostHidden(settings, currentHostname);
     host.setAttribute('data-theme', settings.theme || 'auto');
     wrap.classList.toggle('is-left', settings.side === 'left');
     handleHit.style.top = currentTopPercent + '%';
+    updateVisibility();
     positionDrawer();
   }
 
@@ -189,8 +206,22 @@
   window.addEventListener('mouseup', finishDrag);
   window.addEventListener('blur', finishDrag);
 
+  function onFullscreenChange() {
+    isFullscreen = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+    updateVisibility();
+  }
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+
+  let panelApi = null;
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && isOpen && !isLocked) {
+    if (e.key !== 'Escape' || !isOpen) return;
+    if (panelApi && typeof panelApi.handleEscape === 'function' && panelApi.handleEscape()) {
+      e.stopPropagation();
+      return;
+    }
+    if (!isLocked) {
       clearTimers();
       setOpen(false);
     }
@@ -208,8 +239,9 @@
 
   window.addEventListener('resize', positionDrawer);
 
-  mountPanel(drawer, {
+  panelApi = mountPanel(drawer, {
     mode: 'dock',
+    currentHostname,
     onLockChange(locked) {
       isLocked = locked;
       if (locked && closeTimer) {
@@ -227,5 +259,6 @@
     }
   });
 
+  updateVisibility();
   (document.documentElement || document.body).appendChild(host);
 })(typeof globalThis !== 'undefined' ? globalThis : window);
