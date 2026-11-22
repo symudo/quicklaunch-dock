@@ -1,0 +1,348 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+
+const ROOT = path.resolve(process.cwd());
+const EXT_DIR = path.join(ROOT, 'dist', 'chrome-edge');
+
+const BROWSERS = [
+  { name: 'Edge', exe: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' }
+];
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json();
+}
+
+async function waitForDebugger(port, timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const list = await fetchJson(`http://127.0.0.1:${port}/json/list`);
+      if (Array.isArray(list)) return list;
+    } catch (_) {}
+    await sleep(250);
+  }
+  throw new Error(`Timed out waiting for CDP on port ${port}`);
+}
+
+class CDPClient {
+  constructor(wsUrl) {
+    this.wsUrl = wsUrl;
+    this.id = 0;
+    this.pending = new Map();
+    this.events = [];
+  }
+
+  connect() {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(this.wsUrl);
+      this.ws = ws;
+      ws.addEventListener('open', () => resolve());
+      ws.addEventListener('error', (err) => reject(err));
+      ws.addEventListener('message', (ev) => {
+        const msg = JSON.parse(ev.data.toString());
+        if (msg.id && this.pending.has(msg.id)) {
+          const { resolve: res, reject: rej } = this.pending.get(msg.id);
+          this.pending.delete(msg.id);
+          if (msg.error) rej(new Error(msg.error.message));
+          else res(msg.result);
+        } else if (msg.method) {
+          this.events.push(msg);
+        }
+      });
+    });
+  }
+
+  send(method, params = {}, timeoutMs = 5000) {
+    const id = ++this.id;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP timeout on ${method}`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        }
+      });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async eval(expression) {
+    const res = await this.send('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    if (res.exceptionDetails) {
+      throw new Error('Page exception: ' + JSON.stringify(res.exceptionDetails));
+    }
+    return res.result ? res.result.value : undefined;
+  }
+
+  close() {
+    if (this.ws) this.ws.close();
+  }
+}
+
+async function runBrowserE2E(browser, testPageUrl, debugPort) {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), `qldock-${browser.name.toLowerCase()}-`));
+  const proc = spawn(
+    browser.exe,
+    [
+      `--remote-debugging-port=${debugPort}`,
+      `--user-data-dir=${userDataDir}`,
+      `--disable-extensions-except=${EXT_DIR}`,
+      `--load-extension=${EXT_DIR}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--window-size=1280,820',
+      '--headless=new',
+      testPageUrl
+    ],
+    { stdio: 'ignore' }
+  );
+
+  let pageCdp = null;
+  let popupCdp = null;
+
+  try {
+    await waitForDebugger(debugPort);
+
+    // 等待我们的扩展 Service Worker 与测试页就绪（排除 Chromium 内置组件扩展）
+    let targets = [];
+    let pageTarget = null;
+    let extId = null;
+    for (let i = 0; i < 40; i++) {
+      targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+      pageTarget = targets.find((t) => t.type === 'page' && t.url.startsWith(testPageUrl));
+      const swList = targets.filter((t) => t.type === 'service_worker' && t.url.endsWith('/background.js'));
+      if (pageTarget && swList.length > 0) {
+        // 优先匹配非内置扩展，待会儿通过打开 popup/popup.html 验证身份
+        for (const sw of swList) {
+          const m = /^chrome-extension:\/\/([^/]+)\//.exec(sw.url);
+          if (!m) continue;
+          const candidateId = m[1];
+          const probeUrl = `chrome-extension://${candidateId}/popup/popup.html`;
+          try {
+            const tab = await fetchJson(`http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(probeUrl)}`, { method: 'PUT' });
+            await sleep(250);
+            const curTargets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+            const found = curTargets.find((t) => t.id === tab.id && t.title === 'QuickLaunch Dock');
+            await fetch(`http://127.0.0.1:${debugPort}/json/close/${tab.id}`, { method: 'PUT' }).catch(() => {});
+            if (found) {
+              extId = candidateId;
+              break;
+            }
+          } catch (_) {}
+        }
+        if (extId) break;
+      }
+      await sleep(250);
+    }
+
+    assert.ok(extId, `[${browser.name}] 未找到 QuickLaunch Dock 扩展`);
+    assert.ok(pageTarget, `[${browser.name}] 测试页未打开`);
+    console.log(`[E2E:${browser.name}] 扩展已加载 (id=${extId})`);
+
+    pageCdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
+    await pageCdp.connect();
+    await pageCdp.send('Runtime.enable');
+
+    // 1. 验证 Content Script Shadow DOM 成功挂载
+    let mounted = false;
+    for (let i = 0; i < 20; i++) {
+      mounted = await pageCdp.eval(`Boolean(document.getElementById('qldock-extension-host')?.shadowRoot?.querySelector('.ql-dock-wrap'))`);
+      if (mounted) break;
+      await sleep(200);
+    }
+    assert.equal(mounted, true, `[${browser.name}] Shadow DOM 边缘拉手未注入`);
+    console.log(`[E2E:${browser.name}] ✓ Shadow DOM 边缘拉手注入成功`);
+
+    // 2. 验证悬停拉手自动展开
+    await pageCdp.eval(`
+      (() => {
+        const hit = document.getElementById('qldock-extension-host').shadowRoot.querySelector('.ql-handle-hit');
+        hit.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+      })()
+    `);
+    await sleep(220);
+    const isOpenAfterHover = await pageCdp.eval(`
+      document.getElementById('qldock-extension-host').shadowRoot.querySelector('.ql-dock-wrap').classList.contains('is-open')
+    `);
+    assert.equal(isOpenAfterHover, true, `[${browser.name}] 悬停拉手后未自动展开面板`);
+    console.log(`[E2E:${browser.name}] ✓ 鼠标悬停自动滑出面板生效`);
+
+    // 3. 验证通过面板新增自定义协议项（同时测试编辑态防误关锁定）
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        sr.querySelector('.ql-icon-btn.is-primary').click();
+      })()
+    `);
+    await sleep(100);
+
+    // 模拟鼠标离开，验证表单编辑态下锁定不收起
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        sr.querySelector('.ql-dock-drawer').dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+      })()
+    `);
+    await sleep(420);
+    const stillOpenWhileEditing = await pageCdp.eval(`
+      document.getElementById('qldock-extension-host').shadowRoot.querySelector('.ql-dock-wrap').classList.contains('is-open')
+    `);
+    assert.equal(stillOpenWhileEditing, true, `[${browser.name}] 编辑表单时面板意外收起`);
+    console.log(`[E2E:${browser.name}] ✓ 编辑表单时防误关锁定生效`);
+
+    // 填写名称与自定义协议并保存
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const inputs = sr.querySelectorAll('form.ql-form input.ql-input');
+        inputs[0].value = 'Obsidian';
+        inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+        inputs[1].value = 'obsidian://open?vault=TestVault';
+        inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+        sr.querySelector('form.ql-form button[type="submit"]').click();
+      })()
+    `);
+    await sleep(250);
+
+    const cardCount = await pageCdp.eval(`
+      document.getElementById('qldock-extension-host').shadowRoot.querySelectorAll('.ql-card').length
+    `);
+    assert.equal(cardCount, 1, `[${browser.name}] 保存后未在网格渲染新增项`);
+    console.log(`[E2E:${browser.name}] ✓ 新增自定义协议并渲染成功`);
+
+    // 4. 验证设置切换（左侧停靠 + 深色主题）
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const buttons = Array.from(sr.querySelectorAll('.ql-icon-btn'));
+        const settingsBtn = buttons.find((b) => b.title.includes('设置'));
+        settingsBtn.click();
+      })()
+    `);
+    await sleep(100);
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const segBtns = Array.from(sr.querySelectorAll('.ql-seg-btn'));
+        segBtns.find((b) => b.textContent === '靠左边缘').click();
+        segBtns.find((b) => b.textContent === '深色').click();
+      })()
+    `);
+    await sleep(200);
+    const settingsApplied = await pageCdp.eval(`
+      (() => {
+        const host = document.getElementById('qldock-extension-host');
+        return {
+          theme: host.getAttribute('data-theme'),
+          isLeft: host.shadowRoot.querySelector('.ql-dock-wrap').classList.contains('is-left')
+        };
+      })()
+    `);
+    assert.deepEqual(settingsApplied, { theme: 'dark', isLeft: true });
+    console.log(`[E2E:${browser.name}] ✓ 停靠边切换与深色主题生效`);
+
+    // 5. 验证 Popup 兜底浮窗同步显示并能通过中转页拉起自定义协议
+    const popupUrl = `chrome-extension://${extId}/popup/popup.html`;
+    await fetchJson(`http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(popupUrl)}`, { method: 'PUT' });
+    await sleep(450);
+
+    targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+    const popupTarget = targets.find((t) => t.type === 'page' && t.url === popupUrl);
+    assert.ok(popupTarget, `[${browser.name}] 无法打开 Popup 页面`);
+
+    popupCdp = new CDPClient(popupTarget.webSocketDebuggerUrl);
+    await popupCdp.connect();
+    await popupCdp.send('Runtime.enable');
+
+    let popupCardText = '';
+    for (let i = 0; i < 20; i++) {
+      popupCardText = await popupCdp.eval(`document.querySelector('.ql-card-name')?.textContent || ''`);
+      if (popupCardText) break;
+      await sleep(150);
+    }
+    assert.equal(popupCardText, 'Obsidian', `[${browser.name}] Popup 未同步显示新增快捷项`);
+    console.log(`[E2E:${browser.name}] ✓ Popup 浮窗数据实时同步正常`);
+
+    // 点击卡片，验证同源中转页 launcher/launch.html 被正确打开
+    await popupCdp.eval(`document.querySelector('.ql-card').click()`);
+    await sleep(500);
+
+    targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+    const launcherTarget = targets.find(
+      (t) =>
+        t.type === 'page' &&
+        t.url.startsWith(`chrome-extension://${extId}/launcher/launch.html?`) &&
+        t.url.includes(encodeURIComponent('obsidian://open?vault=TestVault'))
+    );
+    assert.ok(launcherTarget, `[${browser.name}] 点击自定义协议未打开同源中转页 launcher/launch.html`);
+    console.log(`[E2E:${browser.name}] ✓ 自定义协议成功经由同源中转页拉起`);
+
+    // 检查页面与 Popup 无未捕获 JS 异常
+    const pageErrors = pageCdp.events.filter((e) => e.method === 'Runtime.exceptionThrown');
+    const popupErrors = popupCdp.events.filter((e) => e.method === 'Runtime.exceptionThrown');
+    assert.equal(pageErrors.length, 0, `[${browser.name}] 网页端存在 JS 异常: ${JSON.stringify(pageErrors)}`);
+    assert.equal(popupErrors.length, 0, `[${browser.name}] Popup 存在 JS 异常: ${JSON.stringify(popupErrors)}`);
+    console.log(`[E2E:${browser.name}] ✓ 全流程零 JS 异常通过！`);
+  } finally {
+    if (pageCdp) pageCdp.close();
+    if (popupCdp) popupCdp.close();
+    proc.kill();
+    await sleep(500);
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  assert.ok(fs.existsSync(EXT_DIR), '请先运行 node scripts/build.mjs');
+
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><body><h1>QuickLaunch E2E Test Page</h1></body></html>');
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  const testUrl = `http://127.0.0.1:${addr.port}/`;
+
+  let port = 9333;
+  let ranCount = 0;
+  try {
+    for (const b of BROWSERS) {
+      if (!fs.existsSync(b.exe)) {
+        console.log(`[E2E] 跳过 ${b.name}（未检测到安装）`);
+        continue;
+      }
+      await runBrowserE2E(b, testUrl, port++);
+      ranCount += 1;
+    }
+    assert.ok(ranCount > 0, '未找到可用的本地浏览器进行 E2E 测试');
+  } finally {
+    server.close();
+  }
+}
+
+main().catch((err) => {
+  console.error('[E2E FAILED]', err);
+  process.exit(1);
+});
