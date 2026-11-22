@@ -11,6 +11,7 @@ const require = createRequire(import.meta.url);
 const ROOT = path.resolve(process.cwd());
 
 const protocol = require(path.join(ROOT, 'shared/protocol.js'));
+const regParser = require(path.join(ROOT, 'shared/reg-parser.js'));
 const store = require(path.join(ROOT, 'shared/store.js'));
 
 function createMockChrome() {
@@ -126,6 +127,7 @@ test('所有 JS 文件语法检查（无 SyntaxError）', () => {
   const jsFiles = [
     'background.js',
     'shared/protocol.js',
+    'shared/reg-parser.js',
     'shared/store.js',
     'shared/styles.js',
     'shared/panel.js',
@@ -305,6 +307,10 @@ test('background.js 消息路由：网页直开、自定义协议走同源中转
 
 test('extract-changelog.mjs：从 CHANGELOG.md 精准提取对应版本更新日志', () => {
   const md = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const v110 = extractVersionNotes(md, 'v1.1.0');
+  assert.ok(v110.includes('导入 `.reg` 注册表文件'));
+  assert.equal(v110.includes('修复边缘抽屉严重定位错位'), false);
+
   const v101 = extractVersionNotes(md, 'v1.0.1');
   assert.ok(v101.includes('修复边缘抽屉严重定位错位'));
   assert.equal(v101.includes('首个正式版本发布'), false);
@@ -313,6 +319,90 @@ test('extract-changelog.mjs：从 CHANGELOG.md 精准提取对应版本更新日
   assert.ok(v100.includes('首个正式版本发布'));
 
   assert.equal(extractVersionNotes(md, 'v9.9.9'), '');
+});
+
+function encodeUtf16LeWithBom(text) {
+  const body = Buffer.from(text, 'utf16le');
+  return Buffer.concat([Buffer.from([0xff, 0xfe]), body]);
+}
+
+function encodeHexUtf16Z(text) {
+  const buf = Buffer.from(text + '\0', 'utf16le');
+  return Array.from(buf).map((b) => b.toString(16).padStart(2, '0')).join(',');
+}
+
+test('reg-parser.js：解析 url-protocol-manager 导出的 UTF-16LE BOM .reg 与多种边界场景', async () => {
+  const expandCmdHex = encodeHexUtf16Z('"%ProgramFiles%\\MyTool\\MyToolApp.exe" "%1"');
+  const half = Math.floor(expandCmdHex.length / 2);
+  const commaPos = expandCmdHex.indexOf(',', half);
+  const splitHex = expandCmdHex.slice(0, commaPos + 1) + '\\\r\n  ' + expandCmdHex.slice(commaPos + 1);
+
+  const sampleReg = [
+    'Windows Registry Editor Version 5.00',
+    '; Exported by url-protocol-manager',
+    '',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\obsidian]',
+    '@="URL:Obsidian Protocol"',
+    '"URL Protocol"=""',
+    '',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\obsidian\\shell\\open\\command]',
+    '@="\\"C:\\\\Users\\\\Demo\\\\AppData\\\\Local\\\\Obsidian\\\\Obsidian.exe\\" \\"%1\\""',
+    '',
+    // 同名协议也在 HKLM 出现，测试自动去重
+    '[HKEY_LOCAL_MACHINE\\Software\\Classes\\Obsidian]',
+    '"URL Protocol"=""',
+    '',
+    // 无默认描述，测试从 hex(2): 续行命令中提取可执行文件名 MyToolApp
+    '[HKEY_CLASSES_ROOT\\mytool]',
+    '"URL Protocol"=""',
+    '',
+    '[HKEY_CLASSES_ROOT\\mytool\\shell\\open\\command]',
+    `@=hex(2):${splitHex}`,
+    '',
+    // 中文描述与转义字符
+    '[HKEY_CURRENT_USER\\Software\\Classes\\my-note]',
+    '@="URL:我的笔记工具"',
+    '"URL Protocol"=""',
+    '',
+    // 删除键应被忽略
+    '[-HKEY_CURRENT_USER\\Software\\Classes\\deletedproto]',
+    '',
+    // 非协议普通文件后缀与无 URL Protocol 标记项应跳过
+    '[HKEY_CLASSES_ROOT\\.txt]',
+    '@="txtfile"',
+    '',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\notaprotocol]',
+    '@="Not a URL Protocol"',
+    '',
+    // 网页/危险协议即使有标记也必须被安全过滤
+    '[HKEY_CLASSES_ROOT\\javascript]',
+    '"URL Protocol"=""',
+    '[HKEY_CLASSES_ROOT\\http]',
+    '"URL Protocol"=""'
+  ].join('\r\n');
+
+  const utf16Bytes = encodeUtf16LeWithBom(sampleReg);
+  const parsed = regParser.parseRegBuffer(utf16Bytes);
+
+  assert.equal(parsed.protocols.length, 3);
+  assert.deepEqual(
+    parsed.protocols.map((p) => ({ name: p.name, url: p.url })),
+    [
+      { name: 'Obsidian', url: 'obsidian://' },
+      { name: 'MyToolApp', url: 'mytool://' },
+      { name: '我的笔记工具', url: 'my-note://' }
+    ]
+  );
+  assert.ok(parsed.skippedKeys >= 4);
+
+  // 测试 store.addItemsBatch 原子批量写入
+  const { mockChrome } = createMockChrome();
+  globalThis.chrome = mockChrome;
+  const batchRes = await store.addItemsBatch(
+    parsed.protocols.map((p) => ({ name: p.name, url: p.url, iconType: 'auto', iconValue: '' }))
+  );
+  assert.equal(batchRes.added.length, 3);
+  assert.equal(batchRes.items.length, 3);
 });
 
 test('scripts/build.mjs 双端构建产物完整且 ZIP 标准可读', () => {

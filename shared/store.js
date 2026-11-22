@@ -193,6 +193,21 @@
     });
   }
 
+  function addItemsBatch(rawItems) {
+    return enqueueWrite(async () => {
+      const normalized = (Array.isArray(rawItems) ? rawItems : [])
+        .map((r) => normalizeItem(Object.assign({}, r, { id: createId() })))
+        .filter(Boolean);
+      const { items } = await loadAll();
+      if (normalized.length === 0) {
+        return { added: [], items };
+      }
+      const next = items.concat(normalized);
+      await writeItemsUnlocked(next);
+      return { added: normalized, items: next };
+    });
+  }
+
   function updateItem(id, patch) {
     return enqueueWrite(async () => {
       const { items } = await loadAll();
@@ -351,6 +366,7 @@
     saveItems,
     saveSettings,
     addItem,
+    addItemsBatch,
     updateItem,
     removeItem,
     moveItem,

@@ -2,6 +2,16 @@
 
 本项目遵循语义化版本规范，每次打标签发布（`v*`）时 GitHub Actions 会自动提取对应版本的更新日志作为 Release 说明。
 
+## [v1.1.0] - 2026-11-22
+
+### 新增（Added）
+- **支持导入 `.reg` 注册表文件批量快速添加自定义协议**：
+  - 完整兼容 [URL 协议管理器（url-protocol-manager）](https://github.com/symudo/url-protocol-manager) 导出的 **UTF-16LE with BOM** 格式 `.reg` 文件，同时也兼容 Windows 原生 `regedit` 导出的 UTF-16LE / UTF-16BE / UTF-8 `.reg` 文件。
+  - 自动识别 `HKEY_CURRENT_USER\Software\Classes\<scheme>`、`HKEY_LOCAL_MACHINE\Software\Classes\<scheme>` 与 `HKEY_CLASSES_ROOT\<scheme>` 中带 `"URL Protocol"` 标记的自定义协议，自动过滤非协议项、删除键与危险协议，并支持 `REG_EXPAND_SZ`（`hex(2):`）与反斜杠续行解码。
+  - 自动从注册表描述（`@="URL:..."`）或执行程序路径提炼友好名称，同名协议跨 Scope 自动去重。
+  - 新增导入前**可视化预览与勾选确认界面**：支持逐项勾选/全选反选、即时修改显示名称、自动标出列表中「已存在」项避免重复导入，一键原子批量写入。
+  - 在空状态页、新增快捷方式表单与设置页均提供「导入 .reg」入口；工具栏 Popup 下点击自动转入独立管理标签页完成文件选择。
+
 ## [v1.0.1] - 2026-11-22
 
 ### 修复（Fixed）

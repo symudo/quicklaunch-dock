@@ -72,6 +72,7 @@
     const mode = opts.mode || 'dock'; // 'dock' | 'popup' | 'tab'
     const store = global.QLDock.store;
     const protocol = global.QLDock.protocol;
+    const regParser = global.QLDock.regParser;
 
     let state = {
       items: [],
@@ -83,6 +84,7 @@
       pinned: false,
       filePicking: false,
       searchFocused: false,
+      regDraft: null, // { fileName, skippedKeys, entries: [{ selected, name, url, scope, exists }] }
       toast: ''
     };
 
@@ -95,6 +97,62 @@
       'ql-panel' + (mode === 'popup' ? ' is-popup' : mode === 'tab' ? ' is-tab' : '');
     const panel = el('div', panelClass);
     container.appendChild(panel);
+
+    // 持久化在 panel 之外的 .reg 文件选择器，避免任意视图切换时被销毁
+    const regFileInput = document.createElement('input');
+    regFileInput.type = 'file';
+    regFileInput.accept = '.reg';
+    regFileInput.className = 'ql-hidden';
+    regFileInput.setAttribute('data-role', 'reg-file-input');
+    container.appendChild(regFileInput);
+
+    regFileInput.addEventListener('change', async (e) => {
+      state.filePicking = false;
+      notifyLock();
+      const file = e.target.files && e.target.files[0];
+      regFileInput.value = '';
+      if (!file) return;
+      await handleRegFileSelected(file);
+    });
+
+    async function handleRegFileSelected(file) {
+      if (!regParser) {
+        showToast('未加载 .reg 解析模块');
+        return;
+      }
+      try {
+        const buffer = await file.arrayBuffer();
+        const parsed = regParser.parseRegBuffer(buffer);
+        if (!parsed.protocols || parsed.protocols.length === 0) {
+          showToast('未在 .reg 文件中检测到自定义 URL 协议');
+          return;
+        }
+        const existingUrls = new Set(state.items.map((x) => x.url.toLowerCase()));
+        const entries = parsed.protocols.map((p) => {
+          const exists = existingUrls.has(p.url.toLowerCase());
+          return {
+            selected: !exists,
+            name: p.name,
+            url: p.url,
+            scope: p.scope,
+            exists
+          };
+        });
+        state.regDraft = {
+          fileName: file.name || 'protocols.reg',
+          skippedKeys: parsed.skippedKeys || 0,
+          entries
+        };
+        state.view = 'reg-import';
+        render();
+      } catch (err) {
+        showToast('解析 .reg 失败：' + ((err && err.message) || '格式错误'));
+      }
+    }
+
+    function openRegImporter(fallbackTabView) {
+      triggerFilePicker(regFileInput, fallbackTabView || 'settings');
+    }
 
     async function runSafe(fn) {
       try {
@@ -209,6 +267,8 @@
             : '新增快捷方式'
           : state.view === 'settings'
           ? '面板设置'
+          : state.view === 'reg-import'
+          ? '从 .reg 批量导入'
           : 'QuickLaunch';
       brand.appendChild(dot);
       brand.appendChild(el('span', '', titleText));
@@ -224,6 +284,7 @@
           state.view = 'list';
           state.editingId = null;
           state.confirmDelete = false;
+          state.regDraft = null;
           render();
         });
         actions.appendChild(backBtn);
@@ -343,6 +404,12 @@
           state.editingId = null;
           render();
         });
+        const regBtn = el('button', 'ql-btn', '导入 .reg');
+        regBtn.type = 'button';
+        regBtn.title = '导入 Windows 注册表 .reg 文件批量识别自定义协议';
+        regBtn.addEventListener('click', () => {
+          openRegImporter('settings');
+        });
         const sampleBtn = el('button', 'ql-btn', '填入示例');
         sampleBtn.type = 'button';
         sampleBtn.addEventListener('click', () => {
@@ -353,6 +420,7 @@
           });
         });
         btns.appendChild(addBtn);
+        btns.appendChild(regBtn);
         btns.appendChild(sampleBtn);
         empty.appendChild(btns);
         host.appendChild(empty);
@@ -444,6 +512,18 @@
 
       const body = el('div', 'ql-body');
       const form = el('form', 'ql-form');
+
+      if (!existing) {
+        const regBanner = el('div', 'ql-form-banner');
+        regBanner.appendChild(el('span', '', '有导出的 .reg 注册表文件？可一键识别批量导入'));
+        const regBtn = el('button', 'ql-btn is-sm', '导入 .reg');
+        regBtn.type = 'button';
+        regBtn.addEventListener('click', () => {
+          openRegImporter('form');
+        });
+        regBanner.appendChild(regBtn);
+        form.appendChild(regBanner);
+      }
 
       // 名称
       const nameField = el('div', 'ql-field');
@@ -801,8 +881,18 @@
 
       // 备份与恢复
       const backupField = el('div', 'ql-field');
-      backupField.appendChild(el('label', 'ql-label', '数据迁移与备份（Chrome / Edge / Firefox 互通）'));
-      const btnRow = el('div', 'ql-form-footer-group');
+      backupField.appendChild(el('label', 'ql-label', '数据迁移与快速导入'));
+      const btnRow = el('div', 'ql-btn-wrap');
+
+      const importRegBtn = el('button', 'ql-btn is-sm is-primary', '导入 .reg');
+      importRegBtn.type = 'button';
+      importRegBtn.title =
+        mode === 'popup'
+          ? '将在新标签页打开以便选择 .reg 文件'
+          : '支持 URL 协议管理器与 Windows regedit 导出的 .reg 文件';
+      importRegBtn.addEventListener('click', () => {
+        openRegImporter('settings');
+      });
 
       const exportBtn = el('button', 'ql-btn is-sm', '导出 JSON');
       exportBtn.type = 'button';
@@ -857,6 +947,7 @@
         });
       });
 
+      btnRow.appendChild(importRegBtn);
       btnRow.appendChild(exportBtn);
       btnRow.appendChild(importBtn);
       btnRow.appendChild(sampleBtn);
@@ -878,6 +969,139 @@
       return body;
     }
 
+    function renderRegImportView() {
+      const draft = state.regDraft;
+      const body = el('div', 'ql-body');
+      if (!draft || !Array.isArray(draft.entries)) {
+        state.view = 'list';
+        return renderListView();
+      }
+
+      const wrap = el('div', 'ql-form');
+
+      const summary = el('div', 'ql-reg-summary');
+      const countText =
+        `共识别 ${draft.entries.length} 个协议` +
+        (draft.skippedKeys > 0 ? `（忽略 ${draft.skippedKeys} 项非协议）` : '');
+      summary.appendChild(el('span', '', countText));
+
+      const toggleAllBtn = el('button', 'ql-btn is-sm', '全选/反选');
+      toggleAllBtn.type = 'button';
+      toggleAllBtn.addEventListener('click', () => {
+        const allSelected = draft.entries.every((x) => x.selected);
+        draft.entries.forEach((x) => {
+          x.selected = !allSelected;
+        });
+        render();
+      });
+      summary.appendChild(toggleAllBtn);
+      wrap.appendChild(summary);
+
+      const listEl = el('div', 'ql-reg-list');
+      let submitBtn = null;
+
+      function updateSubmitLabel() {
+        if (!submitBtn) return;
+        const selectedCount = draft.entries.filter((x) => x.selected).length;
+        submitBtn.textContent = `导入所选 (${selectedCount})`;
+        submitBtn.disabled = selectedCount === 0;
+      }
+
+      draft.entries.forEach((entry) => {
+        const row = el('div', 'ql-reg-item');
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'ql-reg-check';
+        checkbox.checked = entry.selected;
+        checkbox.addEventListener('change', (e) => {
+          entry.selected = e.target.checked;
+          updateSubmitLabel();
+        });
+
+        const fields = el('div', 'ql-reg-fields');
+        const nameInput = el('input', 'ql-input');
+        nameInput.type = 'text';
+        nameInput.maxLength = 40;
+        nameInput.value = entry.name;
+        nameInput.placeholder = '显示名称';
+        nameInput.addEventListener('input', (e) => {
+          entry.name = e.target.value;
+        });
+
+        const meta = el('div', 'ql-reg-meta');
+        meta.appendChild(el('span', 'ql-reg-scheme', entry.url));
+        if (entry.exists) {
+          meta.appendChild(el('span', 'ql-tag-muted', '已存在'));
+        } else {
+          meta.appendChild(el('span', 'ql-tag-muted', entry.scope));
+        }
+
+        fields.appendChild(nameInput);
+        fields.appendChild(meta);
+
+        row.appendChild(checkbox);
+        row.appendChild(fields);
+        listEl.appendChild(row);
+      });
+
+      wrap.appendChild(listEl);
+
+      const footer = el('div', 'ql-form-footer');
+      const rePickBtn = el('button', 'ql-btn is-sm', '重选文件');
+      rePickBtn.type = 'button';
+      rePickBtn.addEventListener('click', () => {
+        openRegImporter('settings');
+      });
+
+      const rightGroup = el('div', 'ql-form-footer-group');
+      const cancelBtn = el('button', 'ql-btn', '取消');
+      cancelBtn.type = 'button';
+      cancelBtn.addEventListener('click', () => {
+        state.regDraft = null;
+        state.view = 'list';
+        render();
+      });
+
+      submitBtn = el('button', 'ql-btn is-primary', '导入所选');
+      submitBtn.type = 'button';
+      updateSubmitLabel();
+      submitBtn.addEventListener('click', () => {
+        const chosen = draft.entries
+          .filter((x) => x.selected)
+          .map((x) => ({
+            name: (x.name || '').trim() || x.url.replace(/:\/\/$/, ''),
+            url: x.url,
+            iconType: 'auto',
+            iconValue: ''
+          }));
+        if (chosen.length === 0) {
+          showToast('请至少勾选一个协议');
+          return;
+        }
+        runSafe(async () => {
+          const res = await store.addItemsBatch(chosen);
+          state.items = res.items;
+          state.regDraft = null;
+          state.view = 'list';
+          showToast(`已从 .reg 导入 ${res.added.length} 个快捷方式`);
+          render();
+        });
+      });
+
+      rightGroup.appendChild(cancelBtn);
+      rightGroup.appendChild(submitBtn);
+      footer.appendChild(rePickBtn);
+      footer.appendChild(rightGroup);
+      wrap.appendChild(footer);
+
+      body.appendChild(wrap);
+      toastEl = el('div', 'ql-toast ql-hidden');
+      body.appendChild(toastEl);
+      renderToastOnly();
+      return body;
+    }
+
     function render() {
       itemsHostRef = null;
       layoutBtnRef = null;
@@ -887,6 +1111,8 @@
         panel.appendChild(renderFormView());
       } else if (state.view === 'settings') {
         panel.appendChild(renderSettingsView());
+      } else if (state.view === 'reg-import') {
+        panel.appendChild(renderRegImportView());
       } else {
         panel.appendChild(renderListView());
       }
@@ -912,6 +1138,7 @@
         state.view = 'list';
         state.editingId = null;
         state.confirmDelete = false;
+        state.regDraft = null;
         render();
       }
     }
@@ -945,6 +1172,7 @@
       destroy() {
         unsubscribe();
         panel.removeEventListener('keydown', onPanelKeydown);
+        regFileInput.remove();
         panel.remove();
       },
       getSettings() {

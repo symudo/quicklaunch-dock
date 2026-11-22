@@ -643,6 +643,11 @@
       background: var(--ql-surface-hover);
     }
 
+    .ql-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
     .ql-btn.is-primary {
       background: var(--ql-accent);
       border-color: var(--ql-accent);
@@ -698,6 +703,94 @@
       border-radius: 9px;
       padding: 8px 10px;
       line-height: 1.5;
+    }
+
+    /* .reg Import Preview */
+    .ql-reg-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 11.5px;
+      color: var(--ql-text-muted);
+    }
+
+    .ql-reg-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 290px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .ql-reg-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 9px;
+      background: var(--ql-surface);
+      border: 1px solid var(--ql-border);
+    }
+
+    .ql-reg-check {
+      margin-top: 6px;
+      accent-color: var(--ql-accent);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .ql-reg-fields {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .ql-reg-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--ql-text-muted);
+    }
+
+    .ql-reg-scheme {
+      font-family: Consolas, Monaco, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .ql-tag-muted {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 99px;
+      background: rgba(100, 116, 139, 0.16);
+      color: var(--ql-text-muted);
+      flex-shrink: 0;
+    }
+
+    .ql-form-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 9px;
+      background: var(--ql-accent-soft);
+      font-size: 11.5px;
+      color: var(--ql-text);
+    }
+
+    .ql-btn-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
     }
 
     .ql-toast {

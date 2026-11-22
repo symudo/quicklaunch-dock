@@ -241,16 +241,66 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     assert.equal(cardCount, 1, `[${browser.name}] 保存后未在网格渲染新增项`);
     console.log(`[E2E:${browser.name}] ✓ 新增自定义协议并渲染成功`);
 
-    // 3.1 验证搜索框聚焦时，外部 storage 更新不会踢掉搜索输入框焦点
+    // 3.1 验证从 UTF-16LE BOM .reg 文件批量导入（含“已存在”自动不勾选与预览提交）
     await pageCdp.eval(`
       (() => {
         const sr = document.getElementById('qldock-extension-host').shadowRoot;
-        const search = sr.querySelector('.ql-search-bar input');
-        search.focus();
+        const input = sr.querySelector('input[data-role="reg-file-input"]');
+        const regText = [
+          'Windows Registry Editor Version 5.00',
+          '',
+          '[HKEY_CURRENT_USER\\\\Software\\\\Classes\\\\obsidian]',
+          '@="URL:Obsidian Protocol"',
+          '"URL Protocol"=""',
+          '',
+          '[HKEY_CURRENT_USER\\\\Software\\\\Classes\\\\vscode]',
+          '@="URL:Visual Studio Code"',
+          '"URL Protocol"=""',
+          '',
+          '[HKEY_CLASSES_ROOT\\\\steam]',
+          '@="URL:steam protocol"',
+          '"URL Protocol"=""'
+        ].join('\\r\\n');
+        // 编码为 UTF-16LE with BOM (0xFF 0xFE)，完全模拟 url-protocol-manager 导出
+        const bytes = new Uint8Array(2 + regText.length * 2);
+        bytes[0] = 0xff;
+        bytes[1] = 0xfe;
+        for (let i = 0; i < regText.length; i++) {
+          const code = regText.charCodeAt(i);
+          bytes[2 + i * 2] = code & 0xff;
+          bytes[2 + i * 2 + 1] = code >>> 8;
+        }
+        const file = new File([bytes], 'exported-protocols.reg', { type: 'text/plain' });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
       })()
     `);
-    await sleep(60);
-    // 验证独立标签页管理视图（?tab=1&view=settings）正常加载
+    await sleep(300);
+
+    const regPreviewCount = await pageCdp.eval(`
+      document.getElementById('qldock-extension-host').shadowRoot.querySelectorAll('.ql-reg-item').length
+    `);
+    assert.equal(regPreviewCount, 3, `[${browser.name}] .reg 预览列表未识别出 3 个协议`);
+
+    // 点击“导入所选”提交（此前仅添加了带参数的 obsidian://open?vault=TestVault，本次精确新增 3 项，总数为 4）
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const submit = Array.from(sr.querySelectorAll('.ql-btn.is-primary')).find((b) => b.textContent.includes('导入所选'));
+        submit.click();
+      })()
+    `);
+    await sleep(300);
+
+    const totalCardsAfterReg = await pageCdp.eval(`
+      document.getElementById('qldock-extension-host').shadowRoot.querySelectorAll('.ql-card').length
+    `);
+    assert.equal(totalCardsAfterReg, 4, `[${browser.name}] .reg 批量导入后卡片总数应为 4`);
+    console.log(`[E2E:${browser.name}] ✓ UTF-16LE .reg 文件解析、预览与批量导入成功 (总数=4)`);
+
+    // 3.2 验证独立标签页管理视图（?tab=1&view=settings）正常加载
     const tabUrl = `chrome-extension://${extId}/popup/popup.html?tab=1&view=settings`;
     const tabRes = await fetchJson(`http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(tabUrl)}`, { method: 'PUT' });
     await sleep(300);
