@@ -10,10 +10,10 @@
   const PANEL_CSS = global.QLDock && global.QLDock.PANEL_CSS;
   if (!store || !mountPanel || !PANEL_CSS) return;
 
-  const host = document.createElement('div');
+  const host = document.createElement('qldock-root');
   host.id = 'qldock-extension-host';
   host.setAttribute('data-theme', 'auto');
-  host.style.cssText = 'all: initial; position: fixed; z-index: 2147483647; pointer-events: none;';
+  host.style.cssText = 'all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none;';
 
   const shadow = host.attachShadow({ mode: 'open' });
 
@@ -64,12 +64,15 @@
   function positionDrawer() {
     const vh = window.innerHeight || 800;
     const anchorY = (currentTopPercent / 100) * vh;
+    const estHeight = Math.min(520, Math.round(vh * 0.82), Math.max(drawer.offsetHeight || 0, 260));
     if (currentTopPercent <= 55) {
-      const topPx = Math.max(12, Math.min(vh - 240, Math.round(anchorY - 48)));
+      const maxTop = Math.max(12, vh - estHeight - 12);
+      const topPx = Math.max(12, Math.min(maxTop, Math.round(anchorY - 48)));
       drawer.style.top = topPx + 'px';
       drawer.style.bottom = 'auto';
     } else {
-      const bottomPx = Math.max(12, Math.min(vh - 240, Math.round(vh - anchorY - 48)));
+      const maxBottom = Math.max(12, vh - estHeight - 12);
+      const bottomPx = Math.max(12, Math.min(maxBottom, Math.round(vh - anchorY - 48)));
       drawer.style.bottom = bottomPx + 'px';
       drawer.style.top = 'auto';
     }
@@ -81,8 +84,7 @@
     currentTopPercent = Number.isFinite(settings.topPercent) ? settings.topPercent : 42;
     host.setAttribute('data-theme', settings.theme || 'auto');
     wrap.classList.toggle('is-left', settings.side === 'left');
-    wrap.style.top = currentTopPercent + '%';
-    wrap.style.transform = 'translateY(-50%)';
+    handleHit.style.top = currentTopPercent + '%';
     positionDrawer();
   }
 
@@ -169,11 +171,11 @@
     const vh = window.innerHeight || 800;
     const deltaPercent = (dy / vh) * 100;
     currentTopPercent = Math.max(8, Math.min(88, Math.round(dragStartPercent + deltaPercent)));
-    wrap.style.top = currentTopPercent + '%';
+    handleHit.style.top = currentTopPercent + '%';
     positionDrawer();
   });
 
-  window.addEventListener('mouseup', () => {
+  function finishDrag() {
     if (!isDragging) return;
     isDragging = false;
     if (didDragMove) {
@@ -181,6 +183,16 @@
       setTimeout(() => {
         didDragMove = false;
       }, 60);
+    }
+  }
+
+  window.addEventListener('mouseup', finishDrag);
+  window.addEventListener('blur', finishDrag);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isOpen && !isLocked) {
+      clearTimers();
+      setOpen(false);
     }
   });
 

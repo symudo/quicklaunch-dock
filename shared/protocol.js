@@ -113,10 +113,25 @@
     }
   }
 
+  function takeGraphemes(text, count) {
+    if (typeof text !== 'string' || !text) return '';
+    const limit = Math.max(1, count || 1);
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      const out = [];
+      for (const part of seg.segment(text)) {
+        out.push(part.segment);
+        if (out.length >= limit) break;
+      }
+      return out.join('');
+    }
+    return Array.from(text).slice(0, limit).join('');
+  }
+
   function getBadgeInfo(name, url) {
     const labelSource = (name || url || '?').trim();
-    const firstChar = Array.from(labelSource)[0] || '?';
-    const char = /[a-z]/.test(firstChar) ? firstChar.toUpperCase() : firstChar;
+    const firstChar = takeGraphemes(labelSource, 1) || '?';
+    const char = /^[a-z]$/.test(firstChar) ? firstChar.toUpperCase() : firstChar;
 
     let hash = 0;
     for (let i = 0; i < labelSource.length; i++) {
@@ -137,6 +152,7 @@
   const api = {
     validateUrl,
     validateImageUrl,
+    takeGraphemes,
     getBadgeInfo,
     getSchemeLabel
   };

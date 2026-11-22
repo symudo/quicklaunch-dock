@@ -43,6 +43,10 @@ jobs:
             dist/quicklaunch-dock-chrome-edge.zip
             dist/quicklaunch-dock-firefox.zip
 
+      - name: Extract release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/extract-changelog.mjs "${{ github.ref_name }}" dist/release-notes.md
+
       - name: Publish GitHub Release on tag push
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -50,4 +54,5 @@ jobs:
           files: |
             dist/quicklaunch-dock-chrome-edge.zip
             dist/quicklaunch-dock-firefox.zip
-          generate_release_notes: true
+          body_path: dist/release-notes.md
+          generate_release_notes: false

@@ -61,7 +61,7 @@
       if (!iconValue) {
         iconType = 'auto';
       } else {
-        iconValue = Array.from(iconValue).slice(0, 2).join('');
+        iconValue = protocol.takeGraphemes(iconValue, 2);
       }
     } else if (iconType === 'image') {
       if (!protocol.validateImageUrl(iconValue)) {
@@ -95,6 +95,14 @@
     };
   }
 
+  function formatRuntimeError(err) {
+    const msg = err && err.message ? String(err.message) : String(err || '');
+    if (/Extension context invalidated/i.test(msg)) {
+      return new Error('扩展已更新或重载，请刷新当前网页后再试');
+    }
+    return err instanceof Error ? err : new Error(msg || '操作失败');
+  }
+
   function storageGet(keys) {
     return new Promise((resolve, reject) => {
       try {
@@ -105,13 +113,13 @@
         global.chrome.storage.local.get(keys, (result) => {
           const err = global.chrome.runtime && global.chrome.runtime.lastError;
           if (err) {
-            reject(new Error(err.message));
+            reject(formatRuntimeError(err));
           } else {
             resolve(result || {});
           }
         });
       } catch (e) {
-        reject(e);
+        reject(formatRuntimeError(e));
       }
     });
   }
@@ -126,13 +134,13 @@
         global.chrome.storage.local.set(payload, () => {
           const err = global.chrome.runtime && global.chrome.runtime.lastError;
           if (err) {
-            reject(new Error(err.message));
+            reject(formatRuntimeError(err));
           } else {
             resolve();
           }
         });
       } catch (e) {
-        reject(e);
+        reject(formatRuntimeError(e));
       }
     });
   }
@@ -257,19 +265,31 @@
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) {
       throw new Error('备份文件缺少 items 列表');
     }
-    const items = parsed.items.map(normalizeItem).filter(Boolean);
+    const seenIds = new Set();
+    const items = parsed.items
+      .map(normalizeItem)
+      .filter(Boolean)
+      .map((item) => {
+        if (seenIds.has(item.id)) {
+          item = Object.assign({}, item, { id: createId() });
+        }
+        seenIds.add(item.id);
+        return item;
+      });
     const settings = parsed.settings ? normalizeSettings(parsed.settings) : null;
     return { items, settings };
   }
 
-  async function importFromJson(jsonText) {
-    const { items, settings } = parseImportPayload(jsonText);
-    const payload = { [STORAGE_KEY_ITEMS]: items };
-    if (settings) {
-      payload[STORAGE_KEY_SETTINGS] = settings;
-    }
-    await storageSet(payload);
-    return loadAll();
+  function importFromJson(jsonText) {
+    return enqueueWrite(async () => {
+      const { items, settings } = parseImportPayload(jsonText);
+      const payload = { [STORAGE_KEY_ITEMS]: items };
+      if (settings) {
+        payload[STORAGE_KEY_SETTINGS] = settings;
+      }
+      await storageSet(payload);
+      return loadAll();
+    });
   }
 
   function onChange(callback) {
@@ -290,29 +310,33 @@
 
   function openLink(item) {
     return new Promise((resolve, reject) => {
-      if (!global.chrome || !global.chrome.runtime || !global.chrome.runtime.sendMessage) {
-        reject(new Error('扩展通信不可用'));
-        return;
-      }
-      global.chrome.runtime.sendMessage(
-        {
-          type: 'QLDOCK_OPEN_LINK',
-          url: item.url,
-          name: item.name
-        },
-        (resp) => {
-          const err = global.chrome.runtime.lastError;
-          if (err) {
-            reject(new Error(err.message));
-            return;
-          }
-          if (resp && resp.ok) {
-            resolve(resp);
-          } else {
-            reject(new Error((resp && resp.error) || '打开链接失败'));
-          }
+      try {
+        if (!global.chrome || !global.chrome.runtime || !global.chrome.runtime.sendMessage) {
+          reject(new Error('扩展通信不可用，请刷新当前网页后重试'));
+          return;
         }
-      );
+        global.chrome.runtime.sendMessage(
+          {
+            type: 'QLDOCK_OPEN_LINK',
+            url: item.url,
+            name: item.name
+          },
+          (resp) => {
+            const err = global.chrome.runtime && global.chrome.runtime.lastError;
+            if (err) {
+              reject(formatRuntimeError(err));
+              return;
+            }
+            if (resp && resp.ok) {
+              resolve(resp);
+            } else {
+              reject(new Error((resp && resp.error) || '打开链接失败'));
+            }
+          }
+        );
+      } catch (e) {
+        reject(formatRuntimeError(e));
+      }
     });
   }
 

@@ -65,25 +65,18 @@
       box-sizing: border-box;
     }
 
-    /* Dock Wrapper & Handle */
+    /* Dock Wrapper & Handle（严禁给 .ql-dock-wrap 设置 transform，否则后代 position: fixed 会脱离视口参考系） */
     .ql-dock-wrap {
-      position: fixed;
-      z-index: 2147483647;
-      top: 42%;
-      right: 0;
-      display: flex;
-      align-items: center;
       pointer-events: none;
       user-select: none;
     }
 
-    .ql-dock-wrap.is-left {
-      right: auto;
-      left: 0;
-      flex-direction: row-reverse;
-    }
-
     .ql-handle-hit {
+      position: fixed;
+      z-index: 2147483647;
+      top: 42%;
+      right: 0;
+      transform: translateY(-50%);
       pointer-events: auto;
       padding: 10px 0 10px 10px;
       cursor: grab;
@@ -93,6 +86,8 @@
     }
 
     .ql-dock-wrap.is-left .ql-handle-hit {
+      right: auto;
+      left: 0;
       padding: 10px 10px 10px 0;
       justify-content: flex-start;
     }
@@ -182,6 +177,12 @@
       width: 336px;
       min-height: 220px;
       max-height: 540px;
+    }
+
+    .ql-panel.is-tab {
+      width: min(420px, 92vw);
+      max-height: 86vh;
+      margin: 36px auto;
     }
 
     /* Header */

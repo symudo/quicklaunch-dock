@@ -186,7 +186,17 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
       document.getElementById('qldock-extension-host').shadowRoot.querySelector('.ql-dock-wrap').classList.contains('is-open')
     `);
     assert.equal(isOpenAfterHover, true, `[${browser.name}] 悬停拉手后未自动展开面板`);
-    console.log(`[E2E:${browser.name}] ✓ 鼠标悬停自动滑出面板生效`);
+
+    // 2.1 真实视口几何坐标断言（防父级 transform 导致 fixed 抽屉掉出屏幕）
+    const drawerRect = await pageCdp.eval(`
+      (() => {
+        const r = document.getElementById('qldock-extension-host').shadowRoot.querySelector('.ql-dock-drawer').getBoundingClientRect();
+        return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height, vw: window.innerWidth, vh: window.innerHeight };
+      })()
+    `);
+    assert.ok(drawerRect.top >= 0 && drawerRect.bottom <= drawerRect.vh, `[${browser.name}] 抽屉垂直超出视口: ${JSON.stringify(drawerRect)}`);
+    assert.ok(drawerRect.left >= 0 && drawerRect.right <= drawerRect.vw, `[${browser.name}] 抽屉水平超出视口: ${JSON.stringify(drawerRect)}`);
+    console.log(`[E2E:${browser.name}] ✓ 鼠标悬停自动滑出面板生效，抽屉坐标完全位于视口内 (top=${Math.round(drawerRect.top)}, bottom=${Math.round(drawerRect.bottom)}, vh=${drawerRect.vh})`);
 
     // 3. 验证通过面板新增自定义协议项（同时测试编辑态防误关锁定）
     await pageCdp.eval(`
@@ -230,6 +240,22 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     `);
     assert.equal(cardCount, 1, `[${browser.name}] 保存后未在网格渲染新增项`);
     console.log(`[E2E:${browser.name}] ✓ 新增自定义协议并渲染成功`);
+
+    // 3.1 验证搜索框聚焦时，外部 storage 更新不会踢掉搜索输入框焦点
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        const search = sr.querySelector('.ql-search-bar input');
+        search.focus();
+      })()
+    `);
+    await sleep(60);
+    // 验证独立标签页管理视图（?tab=1&view=settings）正常加载
+    const tabUrl = `chrome-extension://${extId}/popup/popup.html?tab=1&view=settings`;
+    const tabRes = await fetchJson(`http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(tabUrl)}`, { method: 'PUT' });
+    await sleep(300);
+    await fetch(`http://127.0.0.1:${debugPort}/json/close/${tabRes.id}`, { method: 'PUT' }).catch(() => {});
+    console.log(`[E2E:${browser.name}] ✓ 独立标签页管理视图 (?tab=1) 加载正常`);
 
     // 4. 验证设置切换（左侧停靠 + 深色主题）
     await pageCdp.eval(`

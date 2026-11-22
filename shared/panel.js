@@ -69,14 +69,14 @@
 
   function mountPanel(container, options) {
     const opts = options || {};
-    const mode = opts.mode || 'dock'; // 'dock' | 'popup'
+    const mode = opts.mode || 'dock'; // 'dock' | 'popup' | 'tab'
     const store = global.QLDock.store;
     const protocol = global.QLDock.protocol;
 
     let state = {
       items: [],
       settings: Object.assign({}, store.DEFAULT_SETTINGS),
-      view: 'list', // 'list' | 'form' | 'settings'
+      view: opts.initialView === 'settings' || opts.initialView === 'form' ? opts.initialView : 'list',
       editingId: null,
       confirmDelete: false,
       search: '',
@@ -87,9 +87,63 @@
     };
 
     let toastTimer = null;
+    let itemsHostRef = null;
+    let layoutBtnRef = null;
+    let hasSearchBarRendered = false;
 
-    const panel = el('div', 'ql-panel' + (mode === 'popup' ? ' is-popup' : ''));
+    const panelClass =
+      'ql-panel' + (mode === 'popup' ? ' is-popup' : mode === 'tab' ? ' is-tab' : '');
+    const panel = el('div', panelClass);
     container.appendChild(panel);
+
+    async function runSafe(fn) {
+      try {
+        await fn();
+      } catch (err) {
+        showToast((err && err.message) || '操作失败，请重试');
+      }
+    }
+
+    function openInTabForFileAction(targetView) {
+      if (global.chrome && global.chrome.tabs && global.chrome.runtime && global.chrome.runtime.getURL) {
+        const url =
+          global.chrome.runtime.getURL('popup/popup.html') +
+          '?tab=1&view=' +
+          encodeURIComponent(targetView || 'settings');
+        global.chrome.tabs.create({ url, active: true });
+        return true;
+      }
+      return false;
+    }
+
+    function triggerFilePicker(inputEl, targetView) {
+      if (mode === 'popup') {
+        if (openInTabForFileAction(targetView)) {
+          return;
+        }
+      }
+      state.filePicking = true;
+      notifyLock();
+
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        state.filePicking = false;
+        notifyLock();
+        window.removeEventListener('focus', onWindowFocus);
+        inputEl.removeEventListener('cancel', onCancel);
+      };
+      const onCancel = () => release();
+      const onWindowFocus = () => {
+        setTimeout(release, 350);
+      };
+      inputEl.addEventListener('cancel', onCancel, { once: true });
+      window.addEventListener('focus', onWindowFocus, { once: true });
+
+      inputEl.value = '';
+      inputEl.click();
+    }
 
     function notifyLock() {
       if (typeof opts.onLockChange === 'function') {
@@ -181,11 +235,14 @@
         );
         layoutBtn.type = 'button';
         layoutBtn.title = state.settings.layout === 'grid' ? '切换为列表视图' : '切换为网格视图';
-        layoutBtn.addEventListener('click', async () => {
-          const nextLayout = state.settings.layout === 'grid' ? 'list' : 'grid';
-          state.settings = await store.saveSettings({ layout: nextLayout });
-          render();
+        layoutBtn.addEventListener('click', () => {
+          runSafe(async () => {
+            const nextLayout = state.settings.layout === 'grid' ? 'list' : 'grid';
+            state.settings = await store.saveSettings({ layout: nextLayout });
+            render();
+          });
         });
+        layoutBtnRef = layoutBtn;
         actions.appendChild(layoutBtn);
 
         if (mode === 'dock') {
@@ -226,8 +283,9 @@
 
     function renderListView() {
       const frag = document.createDocumentFragment();
+      hasSearchBarRendered = state.items.length > 0;
 
-      if (state.items.length > 0) {
+      if (hasSearchBarRendered) {
         const searchBar = el('div', 'ql-search-bar');
         const input = el('input', 'ql-input');
         input.type = 'search';
@@ -252,6 +310,7 @@
 
       const body = el('div', 'ql-body');
       const itemsHost = el('div');
+      itemsHostRef = itemsHost;
       renderItemsContainer(itemsHost);
       body.appendChild(itemsHost);
 
@@ -286,10 +345,12 @@
         });
         const sampleBtn = el('button', 'ql-btn', '填入示例');
         sampleBtn.type = 'button';
-        sampleBtn.addEventListener('click', async () => {
-          state.items = await store.addSampleItems();
-          showToast('已填入 3 个常用软件示例');
-          render();
+        sampleBtn.addEventListener('click', () => {
+          runSafe(async () => {
+            state.items = await store.addSampleItems();
+            showToast('已填入 3 个常用软件示例');
+            render();
+          });
         });
         btns.appendChild(addBtn);
         btns.appendChild(sampleBtn);
@@ -498,6 +559,7 @@
             state.filePicking = false;
             notifyLock();
             const file = e.target.files && e.target.files[0];
+            fileInput.value = '';
             if (!file) return;
             try {
               const dataUrl = await resizeImageToDataUrl(file, 64);
@@ -511,10 +573,9 @@
 
           const uploadBtn = el('button', 'ql-btn is-sm', '上传图');
           uploadBtn.type = 'button';
+          uploadBtn.title = mode === 'popup' ? '将在新标签页打开以便选择本地图片' : '选择本地图片并自动压缩';
           uploadBtn.addEventListener('click', () => {
-            state.filePicking = true;
-            notifyLock();
-            fileInput.click();
+            triggerFilePicker(fileInput, 'form');
           });
 
           row.appendChild(imgInput);
@@ -552,33 +613,43 @@
         const upBtn = el('button', 'ql-btn is-sm', '↑');
         upBtn.type = 'button';
         upBtn.title = '前移一位';
-        upBtn.addEventListener('click', async () => {
-          state.items = await store.moveItem(existing.id, -1);
-          showToast('已前移');
+        upBtn.addEventListener('click', () => {
+          runSafe(async () => {
+            const oldIdx = state.items.findIndex((x) => x.id === existing.id);
+            state.items = await store.moveItem(existing.id, -1);
+            const newIdx = state.items.findIndex((x) => x.id === existing.id);
+            showToast(newIdx === oldIdx ? '已在最前位置' : '已前移一位');
+          });
         });
 
         const downBtn = el('button', 'ql-btn is-sm', '↓');
         downBtn.type = 'button';
         downBtn.title = '后移一位';
-        downBtn.addEventListener('click', async () => {
-          state.items = await store.moveItem(existing.id, 1);
-          showToast('已后移');
+        downBtn.addEventListener('click', () => {
+          runSafe(async () => {
+            const oldIdx = state.items.findIndex((x) => x.id === existing.id);
+            state.items = await store.moveItem(existing.id, 1);
+            const newIdx = state.items.findIndex((x) => x.id === existing.id);
+            showToast(newIdx === oldIdx ? '已在最后位置' : '已后移一位');
+          });
         });
 
         const delBtn = el('button', 'ql-btn is-sm is-danger', state.confirmDelete ? '确认删除' : '删除');
         delBtn.type = 'button';
-        delBtn.addEventListener('click', async () => {
+        delBtn.addEventListener('click', () => {
           if (!state.confirmDelete) {
             state.confirmDelete = true;
             delBtn.textContent = '确认删除';
             return;
           }
-          state.items = await store.removeItem(existing.id);
-          state.view = 'list';
-          state.editingId = null;
-          state.confirmDelete = false;
-          showToast('已删除');
-          render();
+          runSafe(async () => {
+            state.items = await store.removeItem(existing.id);
+            state.view = 'list';
+            state.editingId = null;
+            state.confirmDelete = false;
+            showToast('已删除');
+            render();
+          });
         });
 
         leftGroup.appendChild(upBtn);
@@ -671,8 +742,8 @@
         optionsList.forEach((opt) => {
           const btn = el('button', 'ql-seg-btn' + (currentValue === opt.value ? ' is-active' : ''), opt.label);
           btn.type = 'button';
-          btn.addEventListener('click', async () => {
-            await onSelect(opt.value);
+          btn.addEventListener('click', () => {
+            runSafe(() => onSelect(opt.value));
           });
           seg.appendChild(btn);
         });
@@ -755,6 +826,7 @@
         state.filePicking = false;
         notifyLock();
         const file = e.target.files && e.target.files[0];
+        importInput.value = '';
         if (!file) return;
         try {
           const text = await file.text();
@@ -771,17 +843,18 @@
 
       const importBtn = el('button', 'ql-btn is-sm', '导入 JSON');
       importBtn.type = 'button';
+      importBtn.title = mode === 'popup' ? '将在新标签页打开以便选择备份文件' : '从 JSON 备份文件导入';
       importBtn.addEventListener('click', () => {
-        state.filePicking = true;
-        notifyLock();
-        importInput.click();
+        triggerFilePicker(importInput, 'settings');
       });
 
       const sampleBtn = el('button', 'ql-btn is-sm', '添加示例');
       sampleBtn.type = 'button';
-      sampleBtn.addEventListener('click', async () => {
-        state.items = await store.addSampleItems();
-        showToast('已添加常用软件示例');
+      sampleBtn.addEventListener('click', () => {
+        runSafe(async () => {
+          state.items = await store.addSampleItems();
+          showToast('已添加常用软件示例');
+        });
       });
 
       btnRow.appendChild(exportBtn);
@@ -806,6 +879,8 @@
     }
 
     function render() {
+      itemsHostRef = null;
+      layoutBtnRef = null;
       panel.textContent = '';
       panel.appendChild(renderHeader());
       if (state.view === 'form') {
@@ -818,12 +893,41 @@
       notifyLock();
     }
 
+    function refreshListInPlace() {
+      const needsSearchBar = state.items.length > 0;
+      if (!itemsHostRef || needsSearchBar !== hasSearchBarRendered) {
+        render();
+        return;
+      }
+      if (layoutBtnRef) {
+        layoutBtnRef.textContent = state.settings.layout === 'grid' ? '☰' : '⊞';
+        layoutBtnRef.title = state.settings.layout === 'grid' ? '切换为列表视图' : '切换为网格视图';
+      }
+      renderItemsContainer(itemsHostRef);
+    }
+
+    function onPanelKeydown(e) {
+      if (e.key === 'Escape' && state.view !== 'list') {
+        e.stopPropagation();
+        state.view = 'list';
+        state.editingId = null;
+        state.confirmDelete = false;
+        render();
+      }
+    }
+    panel.addEventListener('keydown', onPanelKeydown);
+
     async function init() {
-      const data = await store.loadAll();
-      state.items = data.items;
-      state.settings = data.settings;
-      notifySettings();
-      render();
+      try {
+        const data = await store.loadAll();
+        state.items = data.items;
+        state.settings = data.settings;
+        notifySettings();
+        render();
+      } catch (err) {
+        render();
+        showToast((err && err.message) || '读取配置失败');
+      }
     }
 
     const unsubscribe = store.onChange((data) => {
@@ -831,7 +935,7 @@
       state.settings = data.settings;
       notifySettings();
       if (state.view === 'list') {
-        render();
+        refreshListInPlace();
       }
     });
 
@@ -840,6 +944,7 @@
     return {
       destroy() {
         unsubscribe();
+        panel.removeEventListener('keydown', onPanelKeydown);
         panel.remove();
       },
       getSettings() {

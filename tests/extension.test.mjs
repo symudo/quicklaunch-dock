@@ -5,6 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { extractVersionNotes } from '../scripts/extract-changelog.mjs';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(process.cwd());
@@ -179,6 +180,11 @@ test('protocol.validateImageUrl & getBadgeInfo', () => {
 
   const badgeZh = protocol.getBadgeInfo('笔记软件', 'obsidian://');
   assert.equal(badgeZh.char, '笔');
+
+  // 复合 Emoji（多码点 ZWJ / 国旗）不被截断
+  assert.equal(protocol.takeGraphemes('👨‍💻', 1), '👨‍💻');
+  assert.equal(protocol.takeGraphemes('🇨🇳🚀', 2), '🇨🇳🚀');
+  assert.equal(protocol.getBadgeInfo('👨‍💻开发', 'vscode://').char, '👨‍💻');
 });
 
 test('store CRUD、排序、设置边界截断、JSON 导出导入与实时同步', async () => {
@@ -239,6 +245,19 @@ test('store CRUD、排序、设置边界截断、JSON 导出导入与实时同�
   assert.throws(() => store.parseImportPayload('{invalid'), /JSON/);
   assert.throws(() => store.parseImportPayload('{"foo":1}'), /items/);
 
+  // 导入包含重复 id 与复合 Emoji 的 JSON：自动重生成重复 id 且保留完整复合 Emoji
+  const dupPayload = JSON.stringify({
+    items: [
+      { id: 'dup_1', name: 'A', url: 'vscode://', iconType: 'emoji', iconValue: '👨‍💻' },
+      { id: 'dup_1', name: 'B', url: 'obsidian://', iconType: 'emoji', iconValue: '🛠️' }
+    ]
+  });
+  const parsedDup = store.parseImportPayload(dupPayload);
+  assert.equal(parsedDup.items.length, 2);
+  assert.notEqual(parsedDup.items[0].id, parsedDup.items[1].id);
+  assert.equal(parsedDup.items[0].iconValue, '👨‍💻');
+  assert.equal(parsedDup.items[1].iconValue, '🛠️');
+
   // 填入示例且去重
   const withSamples = await store.addSampleItems();
   assert.ok(withSamples.some((x) => x.url === 'steam://open/main'));
@@ -254,6 +273,7 @@ test('background.js 消息路由：网页直开、自定义协议走同源中转
   const bgCode = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   vm.runInNewContext(bgCode, {
     chrome: mockChrome,
+    URL,
     encodeURIComponent,
     Set,
     Promise,
@@ -277,9 +297,22 @@ test('background.js 消息路由：网页直开、自定义协议走同源中转
   assert.equal(createdTabs.length, 2);
   assert.equal(createdTabs[1].url, 'https://github.com');
 
-  // 3. 恶意协议 -> 拦截拒绝
+  // 3. 恶意协议与不完整网页链接 -> 拦截拒绝
   await assert.rejects(() => store.openLink({ name: 'XSS', url: 'javascript:alert(1)' }), /不允许/);
+  await assert.rejects(() => store.openLink({ name: 'BadHttp', url: 'http://' }), /格式无效|缺少域名/);
   assert.equal(createdTabs.length, 2);
+});
+
+test('extract-changelog.mjs：从 CHANGELOG.md 精准提取对应版本更新日志', () => {
+  const md = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const v101 = extractVersionNotes(md, 'v1.0.1');
+  assert.ok(v101.includes('修复边缘抽屉严重定位错位'));
+  assert.equal(v101.includes('首个正式版本发布'), false);
+
+  const v100 = extractVersionNotes(md, 'v1.0.0');
+  assert.ok(v100.includes('首个正式版本发布'));
+
+  assert.equal(extractVersionNotes(md, 'v9.9.9'), '');
 });
 
 test('scripts/build.mjs 双端构建产物完整且 ZIP 标准可读', () => {

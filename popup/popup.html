@@ -11,6 +11,19 @@
       background: transparent;
       overflow: hidden;
     }
+    body.is-tab-page {
+      min-height: 100vh;
+      overflow: auto;
+      background: #f1f5f9;
+    }
+    @media (prefers-color-scheme: dark) {
+      body.is-tab-page[data-theme="auto"] {
+        background: #0f111a;
+      }
+    }
+    body.is-tab-page[data-theme="dark"] {
+      background: #0f111a;
+    }
   </style>
 </head>
 <body>

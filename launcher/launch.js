@@ -29,7 +29,7 @@
   titleEl.textContent = rawName ? `正在打开 ${rawName}` : `正在调用 ${check.scheme}://`;
   urlBoxEl.textContent = targetUrl;
 
-  let hasBlurred = false;
+  let hasHidden = false;
   let autoCloseTimer = null;
 
   function triggerLaunch() {
@@ -38,27 +38,20 @@
 
   retryBtn.addEventListener('click', triggerLaunch);
 
-  // 如果外部应用被拉起或页面失焦，切回前台/短暂停留后自动关闭中转页，避免残留空白标签
-  window.addEventListener('blur', () => {
-    hasBlurred = true;
-    if (autoCloseTimer) clearTimeout(autoCloseTimer);
-    autoCloseTimer = setTimeout(() => {
-      // 若此时页面已被隐藏（用户切去目标软件），安全关闭该中转页
-      if (document.hidden) {
-        window.close();
-      }
-    }, 1500);
-  });
-
+  // 仅当页面确实进入后台不可见状态（用户已切到目标软件窗口）才自动关闭，
+  // 避免首次弹出确认框点击“取消”时页面瞬间自毁而无法点击“重新拉起”。
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && hasBlurred) {
-      setTimeout(() => window.close(), 800);
-    }
-  });
-
-  window.addEventListener('focus', () => {
-    if (hasBlurred) {
-      setTimeout(() => window.close(), 400);
+    if (document.hidden) {
+      hasHidden = true;
+      if (autoCloseTimer) clearTimeout(autoCloseTimer);
+      autoCloseTimer = setTimeout(() => {
+        if (document.hidden && hasHidden) {
+          window.close();
+        }
+      }, 900);
+    } else if (autoCloseTimer) {
+      clearTimeout(autoCloseTimer);
+      autoCloseTimer = null;
     }
   });
 

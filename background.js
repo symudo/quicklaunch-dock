@@ -28,6 +28,14 @@ function classifyUrl(rawUrl) {
     return { valid: false, error: `不允许打开 ${scheme}: 协议` };
   }
   if (scheme === 'http' || scheme === 'https') {
+    try {
+      const parsed = new URL(trimmed);
+      if (!parsed.hostname) {
+        return { valid: false, error: '网页链接缺少域名' };
+      }
+    } catch (_) {
+      return { valid: false, error: '网页链接格式无效' };
+    }
     return { valid: true, kind: 'web', url: trimmed, scheme };
   }
   return { valid: true, kind: 'custom', url: trimmed, scheme };
