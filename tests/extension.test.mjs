@@ -62,6 +62,9 @@ function createMockChrome() {
       update(tabId, props, cb) {
         updatedTabs.push({ tabId, props });
         if (cb) cb({ id: tabId, ...props });
+      },
+      query(_queryInfo, cb) {
+        if (cb) cb([{ id: 303, active: true }]);
       }
     },
     storage: {
@@ -346,21 +349,37 @@ test('background.js 消息路由：网页直开、自定义协议透传 openerTa
   assert.equal(updatedTabs[0].props.active, true);
   assert.deepEqual(removedTabs, [202]);
 
+  // 1.3 Popup 场景（sender.tab 为空）通过 tabs.query 自动获取当前激活标签页 ID (303) 作为 openerTabId
+  await new Promise((resolve) => {
+    mockChrome.runtime.sendMessage(
+      { type: 'QLDOCK_OPEN_LINK', name: 'Obsidian', url: 'obsidian://open?vault=Work' },
+      resolve,
+      {}
+    );
+  });
+  assert.equal(createdTabs.length, 3);
+  assert.equal(createdTabs[2].openerTabId, 303);
+  assert.ok(createdTabs[2].url.includes('openerTabId=303'));
+
   // 2. 普通网页 -> 直接新标签页打开
   const resWeb = await store.openLink({ name: 'GitHub', url: 'https://github.com' });
   assert.equal(resWeb.ok, true);
   assert.equal(resWeb.kind, 'web');
-  assert.equal(createdTabs.length, 3);
-  assert.equal(createdTabs[2].url, 'https://github.com');
+  assert.equal(createdTabs.length, 4);
+  assert.equal(createdTabs[3].url, 'https://github.com');
 
   // 3. 恶意协议与不完整网页链接 -> 拦截拒绝
   await assert.rejects(() => store.openLink({ name: 'XSS', url: 'javascript:alert(1)' }), /不允许/);
   await assert.rejects(() => store.openLink({ name: 'BadHttp', url: 'http://' }), /格式无效|缺少域名/);
-  assert.equal(createdTabs.length, 3);
+  assert.equal(createdTabs.length, 4);
 });
 
 test('extract-changelog.mjs：从 CHANGELOG.md 精准提取对应版本更新日志', () => {
   const md = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const v131 = extractVersionNotes(md, 'v1.3.1');
+  assert.ok(v131.includes('修复同源中转页首次授权误关问题'));
+  assert.equal(v131.includes('默认切换为「原页静默直连」模式'), false);
+
   const v130 = extractVersionNotes(md, 'v1.3.0');
   assert.ok(v130.includes('原页静默直连'));
   assert.equal(v130.includes('全屏视频自动隐藏边缘拉手'), false);

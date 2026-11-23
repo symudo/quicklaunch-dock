@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "QuickLaunch Dock",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "浏览器边缘快捷启动栏，支持自定义 URL 协议一键直达本地软件与常用链接。",
   "icons": {
     "16": "icons/icon16.png",

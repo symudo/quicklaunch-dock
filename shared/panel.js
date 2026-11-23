@@ -121,6 +121,13 @@
       }
     }
 
+    function resetFileDragOverlay() {
+      if (fileDragDepth !== 0 || !dropOverlay.classList.contains('ql-hidden')) {
+        fileDragDepth = 0;
+        setDropOverlayVisible(false);
+      }
+    }
+
     panel.addEventListener('dragenter', (e) => {
       if (!isFileDragEvent(e)) return;
       e.preventDefault();
@@ -143,11 +150,14 @@
       }
     });
 
+    panel.addEventListener('mouseleave', resetFileDragOverlay);
+    window.addEventListener('dragend', resetFileDragOverlay);
+    window.addEventListener('drop', resetFileDragOverlay);
+
     panel.addEventListener('drop', (e) => {
       if (!isFileDragEvent(e)) return;
       e.preventDefault();
-      fileDragDepth = 0;
-      setDropOverlayVisible(false);
+      resetFileDragOverlay();
       const files = e.dataTransfer && e.dataTransfer.files;
       const file = files && files[0];
       if (!file) return;
@@ -322,6 +332,25 @@
       a.remove();
     }
 
+    function finishAfterLaunch(item) {
+      if (mode === 'dock' && !state.pinned && (state.search.trim() || state.searchFocused)) {
+        state.search = '';
+        state.searchFocused = false;
+        if (searchInputRef) {
+          searchInputRef.value = '';
+          searchInputRef.blur();
+        }
+        if (itemsHostRef) {
+          renderItemsContainer(itemsHostRef);
+        }
+        notifyLock();
+      }
+      showToast('正在打开 ' + item.name + '...');
+      if (typeof opts.onLaunched === 'function') {
+        opts.onLaunched(item);
+      }
+    }
+
     async function handleLaunch(item) {
       try {
         const check = protocol.validateUrl(item.url);
@@ -332,17 +361,11 @@
         // 默认“原页静默直连”模式：在网页边缘点击自定义协议时直接于当前页拉起，绝不新开标签页
         if (check.kind === 'custom' && mode === 'dock' && state.settings.launchMode !== 'relay') {
           triggerDirectProtocolInPage(check.url);
-          showToast('正在打开 ' + item.name + '...');
-          if (typeof opts.onLaunched === 'function') {
-            opts.onLaunched(item);
-          }
+          finishAfterLaunch(item);
           return;
         }
         await store.openLink(item);
-        showToast('正在打开 ' + item.name + '...');
-        if (typeof opts.onLaunched === 'function') {
-          opts.onLaunched(item);
-        }
+        finishAfterLaunch(item);
       } catch (err) {
         showToast('打开失败：' + (err && err.message ? err.message : '未知错误'));
       }
@@ -1179,6 +1202,10 @@
         const file = e.target.files && e.target.files[0];
         importInput.value = '';
         if (!file) return;
+        if (typeof file.size === 'number' && file.size > MAX_REG_FILE_BYTES) {
+          showToast('备份文件超过 5MB，无法导入');
+          return;
+        }
         try {
           const text = await file.text();
           const loaded = await store.importFromJson(text);
@@ -1480,6 +1507,8 @@
       destroy() {
         unsubscribe();
         panel.removeEventListener('keydown', onPanelKeydown);
+        window.removeEventListener('dragend', resetFileDragOverlay);
+        window.removeEventListener('drop', resetFileDragOverlay);
         regFileInput.remove();
         panel.remove();
       },

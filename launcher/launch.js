@@ -17,19 +17,29 @@
   const closeBtn = document.getElementById('closeBtn');
 
   function closeAndReturn() {
+    let closed = false;
+    const fallbackClose = () => {
+      if (closed) return;
+      closed = true;
+      window.close();
+    };
     if (window.chrome && window.chrome.runtime && window.chrome.runtime.sendMessage) {
+      const timer = setTimeout(fallbackClose, 300);
       try {
         window.chrome.runtime.sendMessage(
           { type: 'QLDOCK_CLOSE_LAUNCHER', openerTabId },
           () => {
+            clearTimeout(timer);
             void window.chrome.runtime.lastError;
-            window.close();
+            fallbackClose();
           }
         );
         return;
-      } catch (_) {}
+      } catch (_) {
+        clearTimeout(timer);
+      }
     }
-    window.close();
+    fallbackClose();
   }
 
   closeBtn.addEventListener('click', closeAndReturn);
@@ -115,22 +125,14 @@
       }, delayMs);
     };
 
-    // Windows 上切到外部软件通常只触发 blur（document.hidden 仍为 false）；
-    // 若持续失焦 >= 4 秒说明已成功切去目标软件，自动记住并关闭；若快速点取消回到本页则取消关闭。
-    window.addEventListener('blur', () => {
-      scheduleFirstTimeClose(4000);
-    });
-
+    // 仅当页面确实进入后台不可见状态（如切走标签页或最小化浏览器）才自动记住并关闭，
+    // 绝不在单纯 window.blur 后强制倒计时关闭，防止用户阅读系统确认框超过几秒时误关确认框或误标已授权。
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         scheduleFirstTimeClose(1000);
       } else {
         clearAutoClose();
       }
-    });
-
-    window.addEventListener('focus', () => {
-      clearAutoClose();
     });
   }
 

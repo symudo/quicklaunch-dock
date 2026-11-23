@@ -331,20 +331,35 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     assert.equal(totalCardsAfterReg, 4, `[${browser.name}] .reg 批量导入后卡片总数应为 4`);
     console.log(`[E2E:${browser.name}] ✓ UTF-16LE .reg 自动 Emoji 匹配、URL 微调与批量导入成功 (总数=4)`);
 
-    // 3.1.2 验证默认「原页静默直连」模式：在网页边缘点击自定义协议绝不新开标签页，且原网页 URL 保持不变
+    // 3.1.2 验证默认「原页静默直连」模式 + 搜索回车启动后自动清空搜索词并平滑收起抽屉
     const pagesBeforeDirect = (await fetchJson(`http://127.0.0.1:${debugPort}/json/list`)).filter((t) => t.type === 'page').length;
     await pageCdp.eval(`
       (() => {
         const sr = document.getElementById('qldock-extension-host').shadowRoot;
-        sr.querySelector('.ql-card').click();
+        const search = sr.querySelector('.ql-search-bar input');
+        search.focus();
+        search.value = 'TestVault';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       })()
     `);
-    await sleep(450);
+    await sleep(600);
     const pagesAfterDirect = (await fetchJson(`http://127.0.0.1:${debugPort}/json/list`)).filter((t) => t.type === 'page').length;
-    const hrefAfterDirect = await pageCdp.eval(`location.href`);
+    const directCheck = await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        return {
+          href: location.href,
+          isOpen: sr.querySelector('.ql-dock-wrap').classList.contains('is-open'),
+          searchVal: sr.querySelector('.ql-search-bar input')?.value || ''
+        };
+      })()
+    `);
     assert.equal(pagesAfterDirect, pagesBeforeDirect, `[${browser.name}] 默认原页直连模式不应打开新标签页`);
-    assert.ok(hrefAfterDirect.startsWith(testPageUrl), `[${browser.name}] 默认原页直连模式不应改变原网页地址`);
-    console.log(`[E2E:${browser.name}] ✓ 默认原页静默直连模式生效（0 新标签页，浏览器停留在原网页）`);
+    assert.ok(directCheck.href.startsWith(testPageUrl), `[${browser.name}] 默认原页直连模式不应改变原网页地址`);
+    assert.equal(directCheck.searchVal, '', `[${browser.name}] 边缘栏搜索启动后应自动清空搜索词`);
+    assert.equal(directCheck.isOpen, false, `[${browser.name}] 边缘栏搜索启动后抽屉应自动收起`);
+    console.log(`[E2E:${browser.name}] ✓ 默认原页直连 + 搜索回车启动后自动清空并收起抽屉生效`);
 
     // 重新展开抽屉以便继续后续测试
     await pageCdp.eval(`

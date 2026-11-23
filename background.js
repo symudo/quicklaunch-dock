@@ -110,6 +110,27 @@ function closeLauncherTab(launcherTabId, openerTabId) {
   });
 }
 
+function resolveOpenerTabId(sender) {
+  if (sender && sender.tab && typeof sender.tab.id === 'number' && sender.tab.id >= 0) {
+    return Promise.resolve(sender.tab.id);
+  }
+  return new Promise((resolve) => {
+    try {
+      if (!chrome.tabs || !chrome.tabs.query) {
+        resolve(undefined);
+        return;
+      }
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        void chrome.runtime.lastError;
+        const activeTab = Array.isArray(tabs) && tabs[0];
+        resolve(activeTab && typeof activeTab.id === 'number' ? activeTab.id : undefined);
+      });
+    } catch (_) {
+      resolve(undefined);
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) {
     return false;
@@ -132,31 +153,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  const openerTabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : undefined;
-
-  if (check.kind === 'web') {
-    createTab(check.url, openerTabId)
-      .then(() => sendResponse({ ok: true, kind: 'web' }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
-    return true;
-  }
-
-  // 自定义 URL 协议：经由扩展同源中转页拉起，并透传 openerTabId 与是否已授权，实现自动关闭切回原网页
-  isSchemeKnown(check.scheme)
-    .then((known) => {
-      const qs = new URLSearchParams();
-      qs.set('url', check.url);
-      qs.set('name', typeof message.name === 'string' ? message.name : '');
-      if (openerTabId !== undefined) {
-        qs.set('openerTabId', String(openerTabId));
+  resolveOpenerTabId(sender)
+    .then((openerTabId) => {
+      if (check.kind === 'web') {
+        return createTab(check.url, openerTabId).then(() => ({ ok: true, kind: 'web' }));
       }
-      if (known) {
-        qs.set('known', '1');
-      }
-      const launchUrl = chrome.runtime.getURL('launcher/launch.html') + '?' + qs.toString();
-      return createTab(launchUrl, openerTabId);
+      // 自定义 URL 协议：经由扩展同源中转页拉起，并透传 openerTabId 与是否已授权，实现自动关闭切回原网页
+      return isSchemeKnown(check.scheme).then((known) => {
+        const qs = new URLSearchParams();
+        qs.set('url', check.url);
+        qs.set('name', typeof message.name === 'string' ? message.name : '');
+        if (openerTabId !== undefined) {
+          qs.set('openerTabId', String(openerTabId));
+        }
+        if (known) {
+          qs.set('known', '1');
+        }
+        const launchUrl = chrome.runtime.getURL('launcher/launch.html') + '?' + qs.toString();
+        return createTab(launchUrl, openerTabId).then(() => ({ ok: true, kind: 'custom' }));
+      });
     })
-    .then(() => sendResponse({ ok: true, kind: 'custom' }))
+    .then((res) => sendResponse(res))
     .catch((err) => sendResponse({ ok: false, error: err.message }));
 
   return true;
