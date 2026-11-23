@@ -19,6 +19,8 @@ function createMockChrome() {
   const changeListeners = [];
   const messageListeners = [];
   const createdTabs = [];
+  const removedTabs = [];
+  const updatedTabs = [];
 
   const mockChrome = {
     runtime: {
@@ -26,15 +28,16 @@ function createMockChrome() {
       getURL(rel) {
         return 'chrome-extension://mock-ext-id/' + rel.replace(/^\/+/, '');
       },
-      sendMessage(msg, cb) {
+      sendMessage(msg, cb, senderOverride) {
         let responded = false;
         let asyncPending = false;
         const sendResponse = (resp) => {
           responded = true;
           if (cb) cb(resp);
         };
+        const sender = senderOverride || { tab: { id: 100 } };
         for (const fn of messageListeners) {
-          if (fn(msg, {}, sendResponse) === true) {
+          if (fn(msg, sender, sendResponse) === true) {
             asyncPending = true;
           }
         }
@@ -48,9 +51,17 @@ function createMockChrome() {
     },
     tabs: {
       create(opts, cb) {
-        const tab = { id: createdTabs.length + 1, url: opts.url, active: opts.active };
+        const tab = { id: createdTabs.length + 201, url: opts.url, active: opts.active, openerTabId: opts.openerTabId };
         createdTabs.push(tab);
         if (cb) cb(tab);
+      },
+      remove(tabId, cb) {
+        removedTabs.push(tabId);
+        if (cb) cb();
+      },
+      update(tabId, props, cb) {
+        updatedTabs.push({ tabId, props });
+        if (cb) cb({ id: tabId, ...props });
       }
     },
     storage: {
@@ -89,7 +100,7 @@ function createMockChrome() {
     }
   };
 
-  return { mockChrome, storageData, createdTabs };
+  return { mockChrome, storageData, createdTabs, removedTabs, updatedTabs };
 }
 
 test('Manifest 文件结构与所有引用资源完整性校验', () => {
@@ -224,6 +235,16 @@ test('store CRUD、排序、设置边界截断、JSON 导出导入与实时同�
   assert.equal(reordered[0].id, r1.item.id);
   assert.equal(reordered[1].id, r2.item.id);
 
+  // 默认 launchMode 为 direct，支持切换为 relay 及记录/清空 knownSchemes
+  assert.equal((await store.loadAll()).settings.launchMode, 'direct');
+  const relaySettings = await store.saveSettings({ launchMode: 'relay' });
+  assert.equal(relaySettings.launchMode, 'relay');
+
+  await store.markSchemeKnown('Obsidian');
+  assert.equal((await store.getKnownSchemes()).obsidian, true);
+  await store.clearKnownSchemes();
+  assert.equal((await store.getKnownSchemes()).obsidian, undefined);
+
   // 域名隐藏黑名单
   const sHidden = await store.toggleHiddenHost('Example.COM', true);
   assert.equal(store.isHostHidden(sHidden, 'example.com'), true);
@@ -280,12 +301,13 @@ test('store CRUD、排序、设置边界截断、JSON 导出导入与实时同�
   unsub();
 });
 
-test('background.js 消息路由：网页直开、自定义协议走同源中转页、危险协议拦截', async () => {
-  const { mockChrome, createdTabs } = createMockChrome();
+test('background.js 消息路由：网页直开、自定义协议透传 openerTabId/known、自动关闭切回原页与危险协议拦截', async () => {
+  const { mockChrome, createdTabs, removedTabs, updatedTabs } = createMockChrome();
   const bgCode = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   vm.runInNewContext(bgCode, {
     chrome: mockChrome,
     URL,
+    URLSearchParams,
     encodeURIComponent,
     Set,
     Promise,
@@ -294,29 +316,55 @@ test('background.js 消息路由：网页直开、自定义协议走同源中转
 
   globalThis.chrome = mockChrome;
 
-  // 1. 自定义协议 -> launcher/launch.html
+  // 1. 首次打开自定义协议 -> launcher/launch.html（带 openerTabId，不含 known=1）
   const resCustom = await store.openLink({ name: 'Obsidian', url: 'obsidian://open?vault=Work' });
   assert.equal(resCustom.ok, true);
   assert.equal(resCustom.kind, 'custom');
   assert.equal(createdTabs.length, 1);
+  assert.equal(createdTabs[0].openerTabId, 100);
   assert.ok(createdTabs[0].url.startsWith('chrome-extension://mock-ext-id/launcher/launch.html?'));
   assert.ok(createdTabs[0].url.includes(encodeURIComponent('obsidian://open?vault=Work')));
+  assert.ok(createdTabs[0].url.includes('openerTabId=100'));
+  assert.equal(createdTabs[0].url.includes('known=1'), false);
+
+  // 1.1 标记该协议已授权后再次打开 -> 自动带上 known=1
+  await store.markSchemeKnown('obsidian');
+  await store.openLink({ name: 'Obsidian', url: 'obsidian://open?vault=Work' });
+  assert.equal(createdTabs.length, 2);
+  assert.ok(createdTabs[1].url.includes('known=1'));
+
+  // 1.2 中转页发 QLDOCK_CLOSE_LAUNCHER -> 激活原网页 openerTabId 并关闭中转页
+  await new Promise((resolve) => {
+    mockChrome.runtime.sendMessage(
+      { type: 'QLDOCK_CLOSE_LAUNCHER', openerTabId: 100 },
+      resolve,
+      { tab: { id: 202 } }
+    );
+  });
+  assert.equal(updatedTabs.length, 1);
+  assert.equal(updatedTabs[0].tabId, 100);
+  assert.equal(updatedTabs[0].props.active, true);
+  assert.deepEqual(removedTabs, [202]);
 
   // 2. 普通网页 -> 直接新标签页打开
   const resWeb = await store.openLink({ name: 'GitHub', url: 'https://github.com' });
   assert.equal(resWeb.ok, true);
   assert.equal(resWeb.kind, 'web');
-  assert.equal(createdTabs.length, 2);
-  assert.equal(createdTabs[1].url, 'https://github.com');
+  assert.equal(createdTabs.length, 3);
+  assert.equal(createdTabs[2].url, 'https://github.com');
 
   // 3. 恶意协议与不完整网页链接 -> 拦截拒绝
   await assert.rejects(() => store.openLink({ name: 'XSS', url: 'javascript:alert(1)' }), /不允许/);
   await assert.rejects(() => store.openLink({ name: 'BadHttp', url: 'http://' }), /格式无效|缺少域名/);
-  assert.equal(createdTabs.length, 2);
+  assert.equal(createdTabs.length, 3);
 });
 
 test('extract-changelog.mjs：从 CHANGELOG.md 精准提取对应版本更新日志', () => {
   const md = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const v130 = extractVersionNotes(md, 'v1.3.0');
+  assert.ok(v130.includes('原页静默直连'));
+  assert.equal(v130.includes('全屏视频自动隐藏边缘拉手'), false);
+
   const v120 = extractVersionNotes(md, 'v1.2.0');
   assert.ok(v120.includes('全屏视频自动隐藏边缘拉手'));
   assert.equal(v120.includes('导入 `.reg` 注册表文件批量快速添加'), false);

@@ -331,6 +331,30 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     assert.equal(totalCardsAfterReg, 4, `[${browser.name}] .reg 批量导入后卡片总数应为 4`);
     console.log(`[E2E:${browser.name}] ✓ UTF-16LE .reg 自动 Emoji 匹配、URL 微调与批量导入成功 (总数=4)`);
 
+    // 3.1.2 验证默认「原页静默直连」模式：在网页边缘点击自定义协议绝不新开标签页，且原网页 URL 保持不变
+    const pagesBeforeDirect = (await fetchJson(`http://127.0.0.1:${debugPort}/json/list`)).filter((t) => t.type === 'page').length;
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        sr.querySelector('.ql-card').click();
+      })()
+    `);
+    await sleep(450);
+    const pagesAfterDirect = (await fetchJson(`http://127.0.0.1:${debugPort}/json/list`)).filter((t) => t.type === 'page').length;
+    const hrefAfterDirect = await pageCdp.eval(`location.href`);
+    assert.equal(pagesAfterDirect, pagesBeforeDirect, `[${browser.name}] 默认原页直连模式不应打开新标签页`);
+    assert.ok(hrefAfterDirect.startsWith(testPageUrl), `[${browser.name}] 默认原页直连模式不应改变原网页地址`);
+    console.log(`[E2E:${browser.name}] ✓ 默认原页静默直连模式生效（0 新标签页，浏览器停留在原网页）`);
+
+    // 重新展开抽屉以便继续后续测试
+    await pageCdp.eval(`
+      (() => {
+        const sr = document.getElementById('qldock-extension-host').shadowRoot;
+        sr.querySelector('.ql-handle-hit').dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+      })()
+    `);
+    await sleep(200);
+
     // 3.1.5 验证全局 Esc 键从设置子视图返回主列表
     await pageCdp.eval(`
       (() => {
@@ -427,6 +451,25 @@ async function runBrowserE2E(browser, testPageUrl, debugPort) {
     );
     assert.ok(launcherTarget, `[${browser.name}] 搜索回车未打开同源中转页 launcher/launch.html`);
     console.log(`[E2E:${browser.name}] ✓ 搜索回车直达自定义协议（同源中转页）生效`);
+
+    // 5.1 验证已授权协议在中转页自动关闭（不残留“关闭此页”标签）
+    await popupCdp.eval(`window.QLDock.store.markSchemeKnown('obsidian')`);
+    await sleep(100);
+    await popupCdp.eval(`
+      (() => {
+        const search = document.querySelector('.ql-search-bar input');
+        search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      })()
+    `);
+    await sleep(300);
+    targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+    const knownLauncher = targets.find((t) => t.type === 'page' && t.url.includes('known=1'));
+    assert.ok(knownLauncher, `[${browser.name}] 已授权协议中转页未带上 known=1`);
+    await sleep(1300);
+    targets = await fetchJson(`http://127.0.0.1:${debugPort}/json/list`);
+    const stillExists = targets.some((t) => t.id === knownLauncher.id);
+    assert.equal(stillExists, false, `[${browser.name}] 已授权中转页超过 1.3s 仍未自动关闭`);
+    console.log(`[E2E:${browser.name}] ✓ 已授权同源中转页自动秒关并切回原页生效（无残留标签）`);
 
     // 检查页面与 Popup 无未捕获 JS 异常
     const pageErrors = pageCdp.events.filter((e) => e.method === 'Runtime.exceptionThrown');

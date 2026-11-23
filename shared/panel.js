@@ -309,8 +309,35 @@
       }
     }
 
+    function triggerDirectProtocolInPage(url) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.style.display = 'none';
+      a.rel = 'noopener noreferrer';
+      // 阻止事件冒泡出 Shadow DOM，避免宿主网页 SPA 路由拦截器误捕获
+      const stop = (e) => e.stopPropagation();
+      a.addEventListener('click', stop, { once: true });
+      panel.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
     async function handleLaunch(item) {
       try {
+        const check = protocol.validateUrl(item.url);
+        if (!check.valid) {
+          showToast('打开失败：' + check.reason);
+          return;
+        }
+        // 默认“原页静默直连”模式：在网页边缘点击自定义协议时直接于当前页拉起，绝不新开标签页
+        if (check.kind === 'custom' && mode === 'dock' && state.settings.launchMode !== 'relay') {
+          triggerDirectProtocolInPage(check.url);
+          showToast('正在打开 ' + item.name + '...');
+          if (typeof opts.onLaunched === 'function') {
+            opts.onLaunched(item);
+          }
+          return;
+        }
         await store.openLink(item);
         showToast('正在打开 ' + item.name + '...');
         if (typeof opts.onLaunched === 'function') {
@@ -1023,6 +1050,36 @@
         false
       );
 
+      addSegField(
+        '自定义协议打开方式',
+        [
+          { value: 'direct', label: '原页直连（不开新页）' },
+          { value: 'relay', label: '同源中转（自动返回）' }
+        ],
+        state.settings.launchMode,
+        async (val) => {
+          state.settings = await store.saveSettings({ launchMode: val });
+          notifySettings();
+          render();
+        },
+        true
+      );
+
+      if (state.settings.launchMode === 'relay') {
+        const resetRow = el('div', 'ql-btn-wrap');
+        const resetBtn = el('button', 'ql-btn is-sm', '重置中转页授权记录');
+        resetBtn.type = 'button';
+        resetBtn.title = '如果浏览器清除了“始终允许”偏好，点此恢复首次授权引导';
+        resetBtn.addEventListener('click', () => {
+          runSafe(async () => {
+            await store.clearKnownSchemes();
+            showToast('已重置授权记录，下次打开协议将停留引导勾选');
+          });
+        });
+        resetRow.appendChild(resetBtn);
+        wrap.appendChild(resetRow);
+      }
+
       wrap.appendChild(el('div', 'ql-divider'));
 
       // 当前网站隐藏与黑名单管理
@@ -1159,11 +1216,11 @@
       backupField.appendChild(btnRow);
       wrap.appendChild(backupField);
 
-      const tip = el(
-        'div',
-        'ql-tip-box',
-        '提示：首次打开某个自定义协议（如 vscode://）时，勾选浏览器提示框中的“始终允许”，以后全网点击均免确认。空白页或系统页可点右上角图标或按 Alt+Q 呼出。'
-      );
+      const tipText =
+        state.settings.launchMode === 'relay'
+          ? '同源中转模式：每种协议全站只需勾选一次“始终允许”，之后拉起软件约 1 秒自动关闭中转页并切回原网页。'
+          : '原页直连模式（默认）：在网页边缘点击直接拉起软件，绝不新开标签页、浏览器保持原网页。如希望跨网站只确认一次，可切至“同源中转”。';
+      const tip = el('div', 'ql-tip-box', tipText);
       wrap.appendChild(tip);
 
       body.appendChild(wrap);

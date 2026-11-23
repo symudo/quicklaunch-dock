@@ -3,14 +3,16 @@
 
   const STORAGE_KEY_ITEMS = 'qldock_items_v1';
   const STORAGE_KEY_SETTINGS = 'qldock_settings_v1';
+  const STORAGE_KEY_KNOWN_SCHEMES = 'qldock_known_schemes_v1';
 
   const DEFAULT_SETTINGS = {
-    side: 'right',      // 'right' | 'left'
-    topPercent: 42,     // 8 ~ 88
-    hoverOpen: true,    // true: 悬停滑出; false: 仅点击滑出
-    layout: 'grid',     // 'grid' | 'list'
-    theme: 'auto',      // 'auto' | 'light' | 'dark'
-    hiddenHosts: []     // 在指定域名隐藏网页边缘拉手
+    side: 'right',        // 'right' | 'left'
+    topPercent: 42,       // 8 ~ 88
+    hoverOpen: true,      // true: 悬停滑出; false: 仅点击滑出
+    layout: 'grid',       // 'grid' | 'list'
+    theme: 'auto',        // 'auto' | 'light' | 'dark'
+    launchMode: 'direct', // 'direct': 原页静默直连（不开新页）; 'relay': 同源中转（自动返回原页）
+    hiddenHosts: []       // 在指定域名隐藏网页边缘拉手
   };
 
   const SAMPLE_ITEMS = [
@@ -109,6 +111,7 @@
       hoverOpen: typeof src.hoverOpen === 'boolean' ? src.hoverOpen : DEFAULT_SETTINGS.hoverOpen,
       layout: src.layout === 'list' ? 'list' : 'grid',
       theme: src.theme === 'light' || src.theme === 'dark' ? src.theme : 'auto',
+      launchMode: src.launchMode === 'relay' ? 'relay' : 'direct',
       hiddenHosts
     };
   }
@@ -308,6 +311,30 @@
     });
   }
 
+  async function getKnownSchemes() {
+    const data = await storageGet([STORAGE_KEY_KNOWN_SCHEMES]);
+    const map = data[STORAGE_KEY_KNOWN_SCHEMES];
+    return map && typeof map === 'object' ? Object.assign({}, map) : {};
+  }
+
+  function markSchemeKnown(scheme) {
+    return enqueueWrite(async () => {
+      const key = typeof scheme === 'string' ? scheme.trim().toLowerCase() : '';
+      if (!key) return {};
+      const map = await getKnownSchemes();
+      map[key] = true;
+      await storageSet({ [STORAGE_KEY_KNOWN_SCHEMES]: map });
+      return map;
+    });
+  }
+
+  function clearKnownSchemes() {
+    return enqueueWrite(async () => {
+      await storageSet({ [STORAGE_KEY_KNOWN_SCHEMES]: {} });
+      return {};
+    });
+  }
+
   function addSampleItems() {
     return enqueueWrite(async () => {
       const { items } = await loadAll();
@@ -420,6 +447,7 @@
   const api = {
     STORAGE_KEY_ITEMS,
     STORAGE_KEY_SETTINGS,
+    STORAGE_KEY_KNOWN_SCHEMES,
     DEFAULT_SETTINGS,
     SAMPLE_ITEMS,
     normalizeItem,
@@ -429,6 +457,9 @@
     saveItems,
     saveSettings,
     toggleHiddenHost,
+    getKnownSchemes,
+    markSchemeKnown,
+    clearKnownSchemes,
     addItem,
     addItemsBatch,
     updateItem,
